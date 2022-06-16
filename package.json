@@ -1,0 +1,29 @@
+{
+  "name": "vue-to-functional-react",
+  "version": "1.0.0",
+  "description": "Turn Vue SFC components into functional React components",
+  "main": "src/main.js",
+  "type": "commonjs",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/th317erd/vue-to-functional-react.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/th317erd/vue-to-functional-react/issues"
+  },
+  "homepage": "https://github.com/th317erd/vue-to-functional-react#readme",
+  "dependencies": {
+    "@spothero/eslint-plugin-spothero": "github:spothero/eslint-plugin-spothero",
+    "eslint": "^8.13.0",
+    "htmlparser2": "^8.0.1",
+    "janap": "^1.0.8",
+    "nife": "^1.8.1",
+    "sass": "^1.52.3"
+  }
+}
