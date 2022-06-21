@@ -104,7 +104,10 @@ function convertPropOrStateName(propName) {
 
     return newName;
   } else {
-    let newName = propName.replace(/[A-Z0-9]+/g, (m) => `-${m}`).replace(/[A-Za-z0-9]+/g, convertSpecialWords).replace(/-/g, '');
+    let newName = propName.replace(/[A-Z0-9]+/g, (m) => `-${m}`).replace(/[A-Za-z0-9]+/g, convertSpecialWords).replace(/[_-]+/g, '_').replace(/^[_-]+/, '').replace(/[_-]+$/, '');
+    if (propName === 'row_hovered')
+      console.log('NEW NAME: ', propName, newName, Nife.snakeCaseToCamelCase(newName.toLowerCase()));
+
     return Nife.snakeCaseToCamelCase(newName.toLowerCase());
   }
 }

@@ -147,13 +147,16 @@ function doMethodConversions(context, events) {
     methodNames,
   } = context;
 
-  const doConversions = (m, name, equals) => {
+  const doConversions = (name, equals, followingChar) => {
     if (methodNames.indexOf(name) >= 0) {
-      if (events)
+      if (events && followingChar !== '(')
         return `${toMethodName(name)}(event)`;
       else
         return `${toMethodName(name)}`;
     } else if (computedNames.indexOf(name) >= 0) {
+      if (equals)
+        return `computedState.${toComputeName(name)} = ${equals}`;
+
       return `computedState.${toComputeName(name)}`;
     } else if (stateNames.indexOf(name) >= 0) {
       if (equals)
@@ -164,7 +167,10 @@ function doMethodConversions(context, events) {
       return `props.${toPropName(name)}`;
     }
 
-    return m;
+    if (equals)
+      return `${name} = ${equals}`;
+
+    return name;
   };
 
   return doConversions;
@@ -174,21 +180,33 @@ function convertInlineCode(context, code, events) {
   const doConversions = doMethodConversions(context, events);
 
   return code
-    .replace(/([.\W]|\b)([a-zA-Z$][\w$]*)\s*=([^=][^;]+)/gm, (m, prefix, name, _equals) => {
-      if (prefix.trim())
+    .replace(/([.\W]|\b)([a-zA-Z$][\w$]*)\s*[+*/-]?=([^=][^;]+)/gm, (m, _prefix, name, _equals) => {
+      let prefix = _prefix.trim();
+      if (prefix && (/[.'"-]/).test(prefix))
         return m;
+
+      if ((/^\s+$/).test(_prefix))
+        prefix = _prefix;
 
       let equals = _equals;
       if (equals)
         equals = equals.trim();
 
-      return `${prefix}${doConversions(m, name, equals)}`;
+      return `${prefix}${doConversions(name, equals)}`;
     })
-    .replace(/([.\W]|\b)([a-zA-Z$][\w$]*)/gm, (m, prefix, name) => {
-      if (prefix.trim())
+    .replace(/([.\W]|\b)([a-zA-Z$][\w$]*)/gm, (m, _prefix, name, offset, str) => {
+      let followingChar = str.charAt(offset + m.length);
+      if (followingChar === ':')
         return m;
 
-      return `${prefix}${doConversions(m, name)}`;
+      let prefix = _prefix.trim();
+      if (prefix && (/[.'"-]/).test(prefix))
+        return m;
+
+      if ((/^\s+$/).test(_prefix))
+        prefix = _prefix;
+
+      return `${prefix}${doConversions(name, false, followingChar)}`;
     });
 }
 
@@ -207,15 +225,15 @@ function convertMethod(context, func, stripPrefix, convertMethodToArrow) {
   const doConversions = doMethodConversions(context);
 
   return funcStr
-    .replace(/this\.([a-zA-Z$][\w$]*)\s*=([^=][^;]+)/gm, (m, name, _equals) => {
+    .replace(/(this\.)([a-zA-Z$][\w$]*)\s*[+*/-]?=([^=][^;]+)/gm, (m, prefix, name, _equals) => {
       let equals = _equals;
       if (equals)
         equals = equals.trim();
 
-      return doConversions(m, name, equals);
+      return `${prefix}${doConversions(name, equals)}`;
     })
-    .replace(/this\.([\w$]+)/g, (m, name) => {
-      return doConversions(m, name);
+    .replace(/(this\.)([\w$]+)/g, (m, prefix, name) => {
+      return `${prefix}${doConversions(name)}`;
     });
 }
 
@@ -239,7 +257,9 @@ function generateComputed(context, scriptObject) {
     let computeName = computedNames[i];
     let value       = computed[computeName];
     let isFunction  = (typeof value === 'function');
-    let funcBody    = (!isFunction) ? convertInlineCode(context, MiscUtils.convertValueToJS(value, 2), false) : convertMethod(context, value, true);
+    let funcBody    = (!isFunction) ? convertInlineCode(context, MiscUtils.convertValueToJS(value, 2), false).replace(/(get|set)\(([^)]*)\)\s*{/g, (m, name, args) => {
+      return `(${args}) => {`;
+    }) : convertMethod(context, value, true);
 
     if (isFunction)
       computedParts.push(`    '${toComputeName(computeName)}': () => ${funcBody},`);
@@ -247,7 +267,7 @@ function generateComputed(context, scriptObject) {
       computedParts.push(`    '${toComputeName(computeName)}': ${funcBody},`);
   }
 
-  computedParts.push('  };');
+  computedParts.push('  });');
 
   return computedParts.join('\n');
 }
@@ -330,11 +350,11 @@ function attributesToJSX(context, node, attributes, _depth) {
       let comment         = '';
       value               = convertInlineCode(context, attributeValue, true);
 
-      if (eventNameParts.length > 1)
+      if (eventNameParts.length > 1 || eventName === reactEventName)
         comment = ' /* TODO: WARNING: This was a special binding... please refer to the Vue code to correct this event method */';
 
       propName = reactEventName;
-      value = `(event) => { ${value} }${comment}`;
+      value = `(event: any) => { ${value} }${comment}`;
     } else {
       propName  = convertAttributeNameToJSXName(attributeName);
       value     = attributeValue;
@@ -373,8 +393,8 @@ function attributesToJSX(context, node, attributes, _depth) {
       value = values.join(', ');
     }
 
-    if (!(/^['"]/).test(value))
-      value = `{${value}}`;
+    if (!(/^['"]/).test(value) || !(/['"]$/).test(value))
+      value = `{${value.replace(/\n\s*/g, ' ')}}`;
 
     attributeParts.push(`${propName}=${value}`);
   }
@@ -401,22 +421,37 @@ function generateJSXFromDOM(context, nodes, _incomingNodeContext) {
       nodeName,
       prefix,
       firstChild,
+      lastChild,
       insideIf,
+      lastNodeWasIf,
     } = nodeContext;
+
+    let resultContext = {};
 
     if (!firstChild && !insideIf)
       results.push('\n');
 
-    if (handleIfStatement(results, nodeContext))
-      return;
+    let ifResult = handleIfStatement(results, nodeContext);
+    if (ifResult) {
+      if (lastChild)
+        results.push(`\n${prefix}})()}\n\n`);
+
+      return { lastNodeWasIf: true };
+    } else if (lastNodeWasIf) {
+      if (ifResult !== 'NO_END')
+        results.push(`\n${prefix}})()}\n\n`);
+
+      nodeContext.lastNodeWasIf  = false;
+      resultContext.lastNodeWasIf = false;
+    }
 
     if (handleForLoop(results, nodeContext))
-      return;
+      return resultContext;
 
     results.push(`${prefix}<${nodeName}`);
 
     if (nodeContext.isTemplate)
-      results.push(' {/* TODO: Was template = true */}');
+      results.push(' /* TODO: Was template = true */ ');
 
     let attributesStr = attributesToJSX(context, node, attributes, depth + 1);
     if (Nife.isNotEmpty(attributesStr)) {
@@ -427,7 +462,7 @@ function generateJSXFromDOM(context, nodes, _incomingNodeContext) {
     let childrenStr;
 
     if (Object.prototype.hasOwnProperty.call(attributes, 'v-text')) {
-      let value = convertInlineCode(context, attributes['v-text']);
+      let value = convertInlineCode(context, attributes['v-text'], false);
       childrenStr = `  ${MiscUtils.getTabWidthForDepth(depth + 2)}{${value}}\n`;
     } else {
       childrenStr = generateJSXFromDOM(context, node.children || [], Object.assign({}, nodeContext, { depth: depth + 1 }));
@@ -452,7 +487,7 @@ function generateJSXFromDOM(context, nodes, _incomingNodeContext) {
       }
     }
 
-    return results.join('');
+    return resultContext;
   };
 
   const getIfAttribute = (attributes) => {
@@ -523,6 +558,7 @@ function generateJSXFromDOM(context, nodes, _incomingNodeContext) {
       node,
       insideIf,
       lastChild,
+      lastNodeWasIf,
     } = nodeContext;
 
     let ifAttribute = getIfAttribute(attributes);
@@ -554,7 +590,7 @@ function generateJSXFromDOM(context, nodes, _incomingNodeContext) {
       type = 'else';
 
     if (type === 'if') {
-      if (insideIf)
+      if (insideIf || lastNodeWasIf)
         results.push(`\n${prefix}})()}\n\n`);
 
       insideIf = (isShow) ? 'v-show' : 'v-if';
@@ -570,7 +606,7 @@ function generateJSXFromDOM(context, nodes, _incomingNodeContext) {
       condition = ' ';
 
     results.push(`${(type !== 'if') ? ' ' : innerPrefix}${type}${condition}{\n`);
-    let innerResult = generateJSXFromDOM(context, [ node ], Object.assign({}, nodeContext, { depth: depth + 4, ignoreIfStatements: true, insideIf: true }));
+    let innerResult = generateJSXFromDOM(context, [ node ], Object.assign({}, nodeContext, { depth: depth + 4, ignoreIfStatements: true, insideIf: true, lastNodeWasIf: false }));
 
     if (Nife.isEmpty(innerResult))
       results.push(`${innerPrefix2}return null;`);
@@ -579,10 +615,10 @@ function generateJSXFromDOM(context, nodes, _incomingNodeContext) {
 
     results.push(`\n${innerPrefix}}`);
 
-    if (lastChild)
-      results.push(`\n${prefix}})()}\n\n`);
+    // if (lastChild)
+    //   results.push(`\n${prefix}})()}\n\n`);
 
-    return true;
+    return (isShow) ? 'NO_END' : true;
   };
 
   const handleForLoop = (results, nodeContext) => {
@@ -611,7 +647,7 @@ function generateJSXFromDOM(context, nodes, _incomingNodeContext) {
       forLoopResults.push(`${innerPrefix}return null;`);
     else
       forLoopResults.push(`${innerPrefix}return (\n${innerResult}\n${innerPrefix});`);
-    forLoopResults.push(`\n${prefix}}\n`);
+    forLoopResults.push(`\n${prefix}})}\n`);
 
     results.push(forLoopResults.join(''));
 
@@ -641,6 +677,14 @@ function generateJSXFromDOM(context, nodes, _incomingNodeContext) {
     }
   });
 
+  let nodeContext = Object.assign({}, incomingNodeContext, {
+    depth,
+    insideJSX,
+    insideIf,
+    firstChild,
+    prefix,
+  });
+
   for (let i = 0, il = filteredNodes.length; i < il; i++) {
     let node = filteredNodes[i];
     if (node.type !== 'tag')
@@ -655,25 +699,25 @@ function generateJSXFromDOM(context, nodes, _incomingNodeContext) {
 
       nodeName = 'div';
       isTemplate = true;
+    } else if (nodeName.indexOf('-') >= 0) {
+      nodeName = Nife.capitalize(MiscUtils.convertPropOrStateName(nodeName));
     }
 
     let attributes = node.attribs;
     let lastChild = ((i + 1) >= filteredNodes.length);
 
-    let nodeContext = Object.assign({}, incomingNodeContext, {
-      depth,
-      insideJSX,
-      insideIf,
+    nodeContext = Object.assign(nodeContext, {
       node,
       nodeName,
       attributes,
       lastChild,
       firstChild,
       isTemplate,
-      prefix,
     });
 
-    constructNode(results, nodeContext);
+    let result = constructNode(results, nodeContext);
+    if (result)
+      Object.assign(nodeContext, result);
 
     firstChild = false;
   }
