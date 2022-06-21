@@ -17,6 +17,7 @@ const reactEventNames = {
   'copy':               'onCopy',
   'cut':                'onCut',
   'doubleclick':        'onDoubleClick',
+  'dblclick':           'onDoubleClick',
   'drag':               'onDrag',
   'dragend':            'onDragEnd',
   'dragenter':          'onDragEnter',

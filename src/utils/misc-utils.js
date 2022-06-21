@@ -15,19 +15,35 @@ function cleanComponentScript(scriptSource) {
 }
 
 function evalScript(rawScript) {
-  const mapState = (...args) => {
-    let obj = {};
+  if (Nife.isEmpty(rawScript))
+    return {};
 
-    let scopeName = args[0];
-    args[1].forEach((name) => {
-      obj[name] = eval(`(function() { return function ${name}() { /* TODO: mapped state... help! Scope: ${scopeName}.${name} */ }; })()`);
-    });
+  const buildMapFactory = (name, name2) => {
+    return (scopeName, values) => {
+      let obj = {};
 
-    return obj;
+      if (Array.isArray(values)) {
+        values.forEach((argName) => {
+          obj[argName] = eval(`(function() { return function ${name}() { /* TODO: mapped ${name} (${name2})... help! Scope: ${scopeName}.${argName} */ }; })()`);
+        });
+      } else if (Nife.instanceOf(values, 'object')) {
+        let keys = Object.keys(values);
+        keys.forEach((argName) => {
+          let thisValue = values[argName];
+          obj[argName] = eval(`(function() { return function ${name}() { /* TODO: mapped ${name} (${name2})... help! Scope: ${argName} = ${scopeName}.${thisValue} */ }; })()`);
+        });
+      }
+
+      return obj;
+    };
   };
 
+  const mapState    = buildMapFactory('state', 'mapState');
+  const mapActions  = buildMapFactory('action', 'mapActions');
+  const mapGetters  = buildMapFactory('getter', 'mapGetters');
+
   let script = cleanComponentScript(rawScript);
-  let references = [ 'mapState' ];
+  let references = [ 'mapState', 'mapActions', 'mapGetters' ];
   let finalScript;
 
   for (let i = 0; i < 200; i++) {
@@ -36,7 +52,7 @@ function evalScript(rawScript) {
       finalScript = `${script.substring(0, curlyBraceIndex)}return ${script.substring(curlyBraceIndex)}`;
 
       finalScript = `(function(${references.join(',')}) { \n${finalScript}; })(${references.map((ref) => {
-        if (ref === 'mapState')
+        if (ref === 'mapState' || ref === 'mapActions' || ref === 'mapGetters')
           return ref;
 
         return `'${ref}'`;
@@ -49,7 +65,7 @@ function evalScript(rawScript) {
     } catch (error) {
       if (error instanceof ReferenceError) {
         let referenceName = error.message.trim().split(/\s+/g)[0];
-        console.log('Adding reference and trying again: ', referenceName);
+        // console.log('Adding reference and trying again: ', referenceName);
         references.push(referenceName);
         continue;
       }
@@ -79,7 +95,13 @@ function convertPropOrStateName(propName) {
   };
 
   if (!(/[_-]/).test(propName)) {
-    let newName = propName.replace(/[A-Z0-9]+/g, (m) => `-${m}`).replace(/[A-Za-z0-9]+/g, convertSpecialWords).replace(/-/g, '');
+    let newName = propName;
+
+    if ((/^[A-Z0-9$]+$/).test(propName))
+      newName = newName.toLowerCase();
+
+    newName = newName.replace(/[A-Z0-9]+/g, (m) => `-${m}`).replace(/[A-Za-z0-9]+/g, convertSpecialWords).replace(/-/g, '');
+
     return newName;
   } else {
     let newName = propName.replace(/[A-Z0-9]+/g, (m) => `-${m}`).replace(/[A-Za-z0-9]+/g, convertSpecialWords).replace(/-/g, '');

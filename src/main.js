@@ -45,7 +45,12 @@ Usage: vue-to-react -i {input folder} -o {output folder}
     FileUtils.walkFiles(
       inputPath,
       ({ fullFileName }) => {
-        console.log(fullFileName);
+        try {
+          let result = ParserUtils.parseVueSFC(fullFileName);
+          convertToReact(inputPath, outputPath, result);
+        } catch (error) {
+          console.error(`Error converting "${fullFileName}": `, error);
+        }
       },
       {
         filter: ({ fullFileName, fileName, stats }) => {

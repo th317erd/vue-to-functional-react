@@ -27,7 +27,7 @@ function getOutputPathAndName(inputPath, outputPath, parsedSFC) {
   FileSystem.mkdirSync(filePath, { recursive: true });
 
   return {
-    fullFileName: Path.join(outputDir, nameConverted, `${nameConverted}.jsx`),
+    fullFileName: Path.join(outputDir, nameConverted, `${nameConverted}.tsx`),
     filePath,
     nameConverted,
     name,
@@ -72,12 +72,18 @@ function propsToTS(props, _depth) {
     let value       = props[propName];
     let newPropName = toPropName(propName);
 
+    if (Nife.instanceOf(value, 'object')) {
+      if (value.type) {
+        value = value.type;
+      } else {
+        interfaceParts.push(`${prefix}${newPropName}: any /* TODO: Warning, unsure about this one, please check */;\n`);
+        continue;
+      }
+    }
+
     if (Array.isArray(value)) {
       let result = propsToTS(value, depth + 1);
       interfaceParts.push(`${prefix}${newPropName}: Array<${result}>;\n`);
-    } else if (Nife.instanceOf(value, 'object')) {
-      let result = propsToTS(value, depth + 1);
-      interfaceParts.push(`${prefix}${newPropName}: {${result}${prefix}};\n`);
     } else {
       if (isArray)
         interfaceParts.push(vueTypeToTSType(value));
@@ -91,7 +97,7 @@ function propsToTS(props, _depth) {
 
 function propsToInterface(componentName, scriptObject) {
   let props = scriptObject.props;
-  if (!props)
+  if (!props || Array.isArray(props))
     return `export interface ${componentName}Props {}`;
 
   return `export interface ${componentName}Props {${propsToTS(props)}};`;
@@ -168,15 +174,21 @@ function convertInlineCode(context, code, events) {
   const doConversions = doMethodConversions(context, events);
 
   return code
-    .replace(/([a-zA-Z$][\w$]*)\s*=([^=][^;]+)/gm, (m, name, _equals) => {
+    .replace(/([.\W]|\b)([a-zA-Z$][\w$]*)\s*=([^=][^;]+)/gm, (m, prefix, name, _equals) => {
+      if (prefix.trim())
+        return m;
+
       let equals = _equals;
       if (equals)
         equals = equals.trim();
 
-      return doConversions(m, name, equals);
+      return `${prefix}${doConversions(m, name, equals)}`;
     })
-    .replace(/([a-zA-Z$][\w$]*)/gm, (m, name) => {
-      return doConversions(m, name);
+    .replace(/([.\W]|\b)([a-zA-Z$][\w$]*)/gm, (m, prefix, name) => {
+      if (prefix.trim())
+        return m;
+
+      return `${prefix}${doConversions(m, name)}`;
     });
 }
 
@@ -378,9 +390,70 @@ function attributesToJSX(context, node, attributes, _depth) {
   }
 }
 
-function generateJSXFromDOM(context, nodes, _depth, _insideJSX, ignoreIfStatements) {
+function generateJSXFromDOM(context, nodes, _incomingNodeContext) {
   if (Nife.isEmpty(nodes))
     return '';
+
+  const constructNode = (results, nodeContext) => {
+    let {
+      attributes,
+      node,
+      nodeName,
+      prefix,
+      firstChild,
+      insideIf,
+    } = nodeContext;
+
+    if (!firstChild && !insideIf)
+      results.push('\n');
+
+    if (handleIfStatement(results, nodeContext))
+      return;
+
+    if (handleForLoop(results, nodeContext))
+      return;
+
+    results.push(`${prefix}<${nodeName}`);
+
+    if (nodeContext.isTemplate)
+      results.push(' {/* TODO: Was template = true */}');
+
+    let attributesStr = attributesToJSX(context, node, attributes, depth + 1);
+    if (Nife.isNotEmpty(attributesStr)) {
+      results.push(' ');
+      results.push(attributesStr);
+    }
+
+    let childrenStr;
+
+    if (Object.prototype.hasOwnProperty.call(attributes, 'v-text')) {
+      let value = convertInlineCode(context, attributes['v-text']);
+      childrenStr = `  ${MiscUtils.getTabWidthForDepth(depth + 2)}{${value}}\n`;
+    } else {
+      childrenStr = generateJSXFromDOM(context, node.children || [], Object.assign({}, nodeContext, { depth: depth + 1 }));
+    }
+
+    if (Nife.isNotEmpty(childrenStr)) {
+      if (attributesStr.indexOf('\n') >= 0) {
+        results.push('\n');
+        results.push(`${prefix}>\n`);
+      } else {
+        results.push('>\n');
+      }
+
+      results.push(childrenStr);
+      results.push(`${prefix}</${nodeName}>\n`);
+    } else {
+      if (attributesStr.indexOf('\n') >= 0) {
+        results.push('\n');
+        results.push(`${prefix}/>\n`);
+      } else {
+        results.push('/>\n');
+      }
+    }
+
+    return results.join('');
+  };
 
   const getIfAttribute = (attributes) => {
     let attributeNames = Object.keys(attributes);
@@ -410,8 +483,17 @@ function generateJSXFromDOM(context, nodes, _depth, _insideJSX, ignoreIfStatemen
         });
       }
 
-      if (sourceName.match(/^\d+$/))
+      if (sourceName)
+        sourceName = convertInlineCode(context, sourceName);
+
+      if (sourceName.match(/^\d+$/)) {
+        let items = [];
         sourceName = parseInt(sourceName, 10);
+        for (let i = 0; i < sourceName; i++)
+          items.push(i);
+
+        sourceName = `[ ${items.join(', ')} ]`;
+      }
 
       return { name, indexName, sourceName };
     };
@@ -423,30 +505,46 @@ function generateJSXFromDOM(context, nodes, _depth, _insideJSX, ignoreIfStatemen
         let attributeValue  = attributes[attributeName];
         let parsed          = parseForLoop(attributeValue);
 
-        console.log('PARSED: ', parsed);
+        let keyValue = attributes[':key'];
+        if (Nife.isEmpty(keyValue) && parsed.indexName)
+          keyValue = parsed.indexName;
+
+        parsed.key = keyValue;
 
         return parsed;
       }
     }
   };
 
-  const handleIfStatement = (node, attributes, lastChild) => {
+  const handleIfStatement = (results, nodeContext) => {
+    let {
+      prefix,
+      attributes,
+      node,
+      insideIf,
+      lastChild,
+    } = nodeContext;
+
     let ifAttribute = getIfAttribute(attributes);
     if (!ifAttribute) {
       if (insideIf) {
         insideIf = false;
 
-        results.push(`\n${prefix}})()}\n`);
+        results.push(`\n${prefix}})()}\n\n`);
       }
 
       return;
     }
 
+    if (nodeContext.ignoreIfStatements === true)
+      return;
+
     let type          = ifAttribute.type;
     let isShow        = (type === 'v-show');
     let value         = convertInlineCode(context, ifAttribute.value);
-    let innerPrefix   = MiscUtils.getTabWidthForDepth(depth + 2);
-    let innerPrefix2  = MiscUtils.getTabWidthForDepth(depth + 3);
+    let innerPrefix   = MiscUtils.getTabWidthForDepth(depth + 3);
+    let innerPrefix2  = MiscUtils.getTabWidthForDepth(depth + 4);
+    let innerPrefix3  = MiscUtils.getTabWidthForDepth(depth + 5);
 
     if (type === 'v-if' || type === 'v-show')
       type = 'if';
@@ -457,7 +555,7 @@ function generateJSXFromDOM(context, nodes, _depth, _insideJSX, ignoreIfStatemen
 
     if (type === 'if') {
       if (insideIf)
-        results.push(`\n${prefix}})()}\n`);
+        results.push(`\n${prefix}})()}\n\n`);
 
       insideIf = (isShow) ? 'v-show' : 'v-if';
 
@@ -472,36 +570,64 @@ function generateJSXFromDOM(context, nodes, _depth, _insideJSX, ignoreIfStatemen
       condition = ' ';
 
     results.push(`${(type !== 'if') ? ' ' : innerPrefix}${type}${condition}{\n`);
-    let innerResult = generateJSXFromDOM(context, [ node ], depth + 3, insideJSX, true);
+    let innerResult = generateJSXFromDOM(context, [ node ], Object.assign({}, nodeContext, { depth: depth + 4, ignoreIfStatements: true, insideIf: true }));
 
     if (Nife.isEmpty(innerResult))
       results.push(`${innerPrefix2}return null;`);
     else
-      results.push(`${innerPrefix2}return (\n${innerResult}${innerPrefix2});`);
+      results.push(`${innerPrefix2}return (\n${innerPrefix3}<React.Fragment>\n${innerResult}${innerPrefix3}</React.Fragment>\n${innerPrefix2});`);
 
     results.push(`\n${innerPrefix}}`);
 
     if (lastChild)
-      results.push(`\n${prefix}})()}\n`);
+      results.push(`\n${prefix}})()}\n\n`);
 
     return true;
   };
 
-  const handleForLoop = (node, attributes, lastChild) => {
-    getForAttribute(attributes);
-  };
+  const handleForLoop = (results, nodeContext) => {
+    let {
+      prefix,
+      attributes,
+      node,
+      ignoreForLoop,
+    } = nodeContext;
 
-  // loop = v-for
+    if (ignoreForLoop)
+      return;
+
+    let forAttribute = getForAttribute(attributes);
+    if (!forAttribute)
+      return;
+
+    let args            = [ forAttribute.name, forAttribute.indexName ].filter(Boolean).join(', ');
+    let forLoopResults  = [];
+    let innerPrefix     = MiscUtils.getTabWidthForDepth(depth + 3);
+
+    forLoopResults.push(`\n${prefix}{${forAttribute.sourceName}.map((${args}) => {\n`);
+    let innerResult = generateJSXFromDOM(context, [ node ], Object.assign({}, nodeContext, { depth: depth + 2, ignoreForLoop: true }));
+
+    if (Nife.isEmpty(innerResult))
+      forLoopResults.push(`${innerPrefix}return null;`);
+    else
+      forLoopResults.push(`${innerPrefix}return (\n${innerResult}\n${innerPrefix});`);
+    forLoopResults.push(`\n${prefix}}\n`);
+
+    results.push(forLoopResults.join(''));
+
+    return true;
+  };
 
   // v-html = v-text, but for html
 
-  let depth         = _depth || 0;
-  let insideJSX     = _insideJSX || false;
-  let results       = [];
-  let prefix        = MiscUtils.getTabWidthForDepth(depth + 1);
-  let firstChild    = true;
-  let insideIf      = false;
-  let filteredNodes = nodes.filter((node) => {
+  let incomingNodeContext = Object.assign({}, _incomingNodeContext || {});
+  let depth               = incomingNodeContext.depth || 0;
+  let insideJSX           = incomingNodeContext.insideJSX || false;
+  let results             = [];
+  let prefix              = MiscUtils.getTabWidthForDepth(depth + 2);
+  let firstChild          = true;
+  let insideIf            = false;
+  let filteredNodes       = nodes.filter((node) => {
     if (node.type === 'text') {
       if (!insideJSX)
         return false;
@@ -520,62 +646,36 @@ function generateJSXFromDOM(context, nodes, _depth, _insideJSX, ignoreIfStatemen
     if (node.type !== 'tag')
       continue;
 
-    if (node.name === 'template') {
-      results.push(generateJSXFromDOM(context, node.children, depth + 1, true));
-      continue;
+    let nodeName = node.name;
+    let isTemplate = false;
+
+    if (nodeName === 'template') {
+      // results.push(generateJSXFromDOM(context, node.children, depth + 1, true));
+      // continue;
+
+      nodeName = 'div';
+      isTemplate = true;
     }
-
-    let lastChild = ((i + 1) >= filteredNodes.length);
-
-    if (!firstChild && !insideIf)
-      results.push('\n');
-
-    firstChild = false;
 
     let attributes = node.attribs;
+    let lastChild = ((i + 1) >= filteredNodes.length);
 
-    if (ignoreIfStatements !== true) {
-      if (handleIfStatement(node, attributes, lastChild))
-        continue;
-    }
+    let nodeContext = Object.assign({}, incomingNodeContext, {
+      depth,
+      insideJSX,
+      insideIf,
+      node,
+      nodeName,
+      attributes,
+      lastChild,
+      firstChild,
+      isTemplate,
+      prefix,
+    });
 
-    handleForLoop(node, attributes, lastChild);
+    constructNode(results, nodeContext);
 
-    results.push(`${prefix}<${node.name}`);
-
-    let attributesStr = attributesToJSX(context, node, attributes, depth);
-    if (Nife.isNotEmpty(attributesStr)) {
-      results.push(' ');
-      results.push(attributesStr);
-    }
-
-    let childrenStr;
-
-    if (Object.prototype.hasOwnProperty.call(attributes, 'v-text')) {
-      let value = convertInlineCode(context, attributes['v-text']);
-      childrenStr = `${MiscUtils.getTabWidthForDepth(depth + 2)}{${value}}`;
-    } else {
-      childrenStr = generateJSXFromDOM(context, node.children || [], depth + 1, true);
-    }
-
-    if (Nife.isNotEmpty(childrenStr)) {
-      if (attributesStr.indexOf('\n') >= 0) {
-        results.push('\n');
-        results.push(`${prefix}>\n`);
-      } else {
-        results.push('>\n');
-      }
-
-      results.push(childrenStr);
-      results.push(`${prefix}</${node.name}>\n`);
-    } else {
-      if (attributesStr.indexOf('\n') >= 0) {
-        results.push('\n');
-        results.push(`${prefix}/>\n`);
-      } else {
-        results.push('/>\n');
-      }
-    }
+    firstChild = false;
   }
 
   return results.join('');
@@ -638,7 +738,7 @@ function convertToReact(inputPath, outputPath, parsedSFC) {
 
   let reactComponent = generateReactComponent(parsedSFC);
   //let templateStr = Util.inspect(parsedSFC.template, { depth: Infinity });
-  console.log('COMPONENT: ', reactComponent);
+  // console.log('COMPONENT: ', reactComponent);
 
   FileSystem.writeFileSync(fullFileName, reactComponent, 'utf8');
 }
