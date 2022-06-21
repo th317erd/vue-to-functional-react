@@ -1,3 +1,4 @@
+/* eslint-disable no-magic-numbers */
 /* eslint-disable no-eval */
 'use strict';
 
@@ -43,9 +44,11 @@ function vueTypeToTSType(type) {
   else if (type === BigInt)
     return 'bigint';
   else if (type === Object)
-    return 'any';
+    return 'any /* Object */';
   else if (type === Array)
     return 'Array<any>';
+  else if (type === Function)
+    return 'any /* Function */';
 
   throw new Error(`TypeScript type "${type}" not supported`);
 }
@@ -127,7 +130,7 @@ function generateStateCalls(state) {
 }
 
 function toComputeName(name) {
-  return `compute${Nife.capitalize(MiscUtils.convertPropOrStateName(name))}`;
+  return MiscUtils.convertPropOrStateName(name);
 }
 
 function doMethodConversions(context, events) {
@@ -143,9 +146,9 @@ function doMethodConversions(context, events) {
       if (events)
         return `${toMethodName(name)}(event)`;
       else
-        return `${toMethodName(name)}()`;
+        return `${toMethodName(name)}`;
     } else if (computedNames.indexOf(name) >= 0) {
-      return `${toComputeName(name)}()`;
+      return `computedState.${toComputeName(name)}`;
     } else if (stateNames.indexOf(name) >= 0) {
       if (equals)
         return `set${Nife.capitalize(toStateName(name))}(${equals})`;
@@ -218,15 +221,21 @@ function generateComputed(context, scriptObject) {
     return '';
 
   let computedNames = context.computedNames;
-  let computedParts = [];
+  let computedParts = [ '  const computedState = ComponentUtils.createComputedState({' ];
 
   for (let i = 0, il = computedNames.length; i < il; i++) {
     let computeName = computedNames[i];
     let value       = computed[computeName];
-    let funcBody    = convertMethod(context, value, true);
+    let isFunction  = (typeof value === 'function');
+    let funcBody    = (!isFunction) ? convertInlineCode(context, MiscUtils.convertValueToJS(value, 2), false) : convertMethod(context, value, true);
 
-    computedParts.push(`  const ${toComputeName(computeName)} = () => ${funcBody};\n`);
+    if (isFunction)
+      computedParts.push(`    '${toComputeName(computeName)}': () => ${funcBody},`);
+    else
+      computedParts.push(`    '${toComputeName(computeName)}': ${funcBody},`);
   }
+
+  computedParts.push('  };');
 
   return computedParts.join('\n');
 }
@@ -268,7 +277,10 @@ function convertAttributeNameToJSXName(name) {
   if (name === 'class')
     return 'className';
 
-  return name;
+  if (name.startsWith('v-'))
+    return name;
+
+  return toPropName(name);
 }
 
 function attributesToJSX(context, node, attributes, _depth) {
@@ -290,6 +302,9 @@ function attributesToJSX(context, node, attributes, _depth) {
     if (attributeName === 'v-text') {
       // Handled at the JSX level
       continue;
+    } else if ((/^(v-text|v-html|v-for|v-if|v-else-if|v-else|v-show)/).test(attributeName)) {
+      // Handled at the JSX level
+      continue;
     } else if ((/^v-bind:/).test(attributeName)) {
       propName  = convertAttributeNameToJSXName(attributeName.replace(/^v-bind:/, ''));
       value     = convertInlineCode(context, attributeValue);
@@ -297,15 +312,28 @@ function attributesToJSX(context, node, attributes, _depth) {
       propName  = convertAttributeNameToJSXName(attributeName.substring(1));
       value     = convertInlineCode(context, attributeValue);
     } else if (attributeName.charAt(0) === '@') {
-      let eventName       = attributeName.substring(1).split('.')[0];
+      let eventNameParts  = attributeName.substring(1).split('.');
+      let eventName       = eventNameParts[0];
       let reactEventName  = EventUtils.convertToReactEventName(eventName);
+      let comment         = '';
       value               = convertInlineCode(context, attributeValue, true);
 
+      if (eventNameParts.length > 1)
+        comment = ' /* TODO: WARNING: This was a special binding... please refer to the Vue code to correct this event method */';
+
       propName = reactEventName;
-      value = `(event) => { ${value} }`;
+      value = `(event) => { ${value} }${comment}`;
     } else {
       propName  = convertAttributeNameToJSXName(attributeName);
-      value     = MiscUtils.convertValueToJS(attributeValue);
+      value     = attributeValue;
+
+      if (Nife.isEmpty(value))
+        value = 'true';
+      else
+        value = MiscUtils.convertValueToJS(attributeValue);
+
+      if (propName === 'v-model')
+        value = value + ' /* TODO: Dual binding from child to parent */';
     }
 
     if (!propName || !value)
@@ -350,30 +378,145 @@ function attributesToJSX(context, node, attributes, _depth) {
   }
 }
 
-function generateJSXFromDOM(context, nodes, _depth, _insideJSX) {
+function generateJSXFromDOM(context, nodes, _depth, _insideJSX, ignoreIfStatements) {
   if (Nife.isEmpty(nodes))
     return '';
 
-  let depth       = _depth || 0;
-  let insideJSX   = _insideJSX || false;
-  let results     = [];
-  let prefix      = MiscUtils.getTabWidthForDepth(depth + 1);
-  let firstChild  = true;
+  const getIfAttribute = (attributes) => {
+    let attributeNames = Object.keys(attributes);
+    for (let i = 0, il = attributeNames.length; i < il; i++) {
+      let attributeName = attributeNames[i];
+      if ((/^(v-if|v-else-if|v-else|v-show)/).test(attributeName))
+        return { type: attributeName, value: attributes[attributeName] };
+    }
+  };
 
-  for (let i = 0, il = nodes.length; i < il; i++) {
-    let node = nodes[i];
-    if (node.type === 'text') {
-      if (!insideJSX)
-        continue;
+  const getForAttribute = (attributes) => {
+    const parseForLoop = (value) => {
+      let name;
+      let indexName;
+      let sourceName;
 
-      if (Nife.isEmpty(node.data))
-        continue;
+      if (value.charAt(0) === '(') {
+        value.replace(/\(\s*([\w$]+),\s*([\w$]+)\s*\)\s+in\s+([\w$.]+)/i, (m, _name, _indexName, _sourceName) => {
+          name = _name;
+          indexName = _indexName;
+          sourceName = _sourceName;
+        });
+      } else {
+        value.replace(/([\w$]+)\s+in\s+([\w$.]+)/i, (m, _name, _sourceName) => {
+          name = _name;
+          sourceName = _sourceName;
+        });
+      }
 
-      results.push(node.data.trim());
+      if (sourceName.match(/^\d+$/))
+        sourceName = parseInt(sourceName, 10);
 
-      continue;
+      return { name, indexName, sourceName };
+    };
+
+    let attributeNames = Object.keys(attributes);
+    for (let i = 0, il = attributeNames.length; i < il; i++) {
+      let attributeName = attributeNames[i];
+      if (attributeName === 'v-for') {
+        let attributeValue  = attributes[attributeName];
+        let parsed          = parseForLoop(attributeValue);
+
+        console.log('PARSED: ', parsed);
+
+        return parsed;
+      }
+    }
+  };
+
+  const handleIfStatement = (node, attributes, lastChild) => {
+    let ifAttribute = getIfAttribute(attributes);
+    if (!ifAttribute) {
+      if (insideIf) {
+        insideIf = false;
+
+        results.push(`\n${prefix}})()}\n`);
+      }
+
+      return;
     }
 
+    let type          = ifAttribute.type;
+    let isShow        = (type === 'v-show');
+    let value         = convertInlineCode(context, ifAttribute.value);
+    let innerPrefix   = MiscUtils.getTabWidthForDepth(depth + 2);
+    let innerPrefix2  = MiscUtils.getTabWidthForDepth(depth + 3);
+
+    if (type === 'v-if' || type === 'v-show')
+      type = 'if';
+    else if (type === 'v-else-if')
+      type = 'else if';
+    else if (type === 'v-else')
+      type = 'else';
+
+    if (type === 'if') {
+      if (insideIf)
+        results.push(`\n${prefix}})()}\n`);
+
+      insideIf = (isShow) ? 'v-show' : 'v-if';
+
+      results.push(`\n${prefix}{(() => {\n`);
+    }
+
+    let condition;
+
+    if (type !== 'else')
+      condition = ` (${value}) `;
+    else
+      condition = ' ';
+
+    results.push(`${(type !== 'if') ? ' ' : innerPrefix}${type}${condition}{\n`);
+    let innerResult = generateJSXFromDOM(context, [ node ], depth + 3, insideJSX, true);
+
+    if (Nife.isEmpty(innerResult))
+      results.push(`${innerPrefix2}return null;`);
+    else
+      results.push(`${innerPrefix2}return (\n${innerResult}${innerPrefix2});`);
+
+    results.push(`\n${innerPrefix}}`);
+
+    if (lastChild)
+      results.push(`\n${prefix}})()}\n`);
+
+    return true;
+  };
+
+  const handleForLoop = (node, attributes, lastChild) => {
+    getForAttribute(attributes);
+  };
+
+  // loop = v-for
+
+  // v-html = v-text, but for html
+
+  let depth         = _depth || 0;
+  let insideJSX     = _insideJSX || false;
+  let results       = [];
+  let prefix        = MiscUtils.getTabWidthForDepth(depth + 1);
+  let firstChild    = true;
+  let insideIf      = false;
+  let filteredNodes = nodes.filter((node) => {
+    if (node.type === 'text') {
+      if (!insideJSX)
+        return false;
+
+      if (Nife.isEmpty(node.data))
+        return false;
+
+      return true;
+    } else {
+      return true;
+    }
+  });
+
+  for (let i = 0, il = filteredNodes.length; i < il; i++) {
+    let node = filteredNodes[i];
     if (node.type !== 'tag')
       continue;
 
@@ -382,14 +525,24 @@ function generateJSXFromDOM(context, nodes, _depth, _insideJSX) {
       continue;
     }
 
-    if (!firstChild)
+    let lastChild = ((i + 1) >= filteredNodes.length);
+
+    if (!firstChild && !insideIf)
       results.push('\n');
 
     firstChild = false;
 
+    let attributes = node.attribs;
+
+    if (ignoreIfStatements !== true) {
+      if (handleIfStatement(node, attributes, lastChild))
+        continue;
+    }
+
+    handleForLoop(node, attributes, lastChild);
+
     results.push(`${prefix}<${node.name}`);
 
-    let attributes    = node.attribs;
     let attributesStr = attributesToJSX(context, node, attributes, depth);
     if (Nife.isNotEmpty(attributesStr)) {
       results.push(' ');
@@ -456,7 +609,8 @@ function generateReactComponent(parsedSFC) {
   return `
 import React, { useState, useEffect } from 'react';
 import classNames from 'classnames';
-import './styles.css';
+import ComponentUtils from '@utils/component-utils';
+import './styles.sass';
 
 ${propsInterface}
 
@@ -478,7 +632,7 @@ function convertToReact(inputPath, outputPath, parsedSFC) {
   parsedSFC.componentName = name;
   parsedSFC.convertedComponentName = nameConverted;
 
-  let cssFullFileName = Path.join(filePath, 'styles.css');
+  let cssFullFileName = Path.join(filePath, 'styles.sass');
   let styleSheet      = parsedSFC.style || '';
   FileSystem.writeFileSync(cssFullFileName, styleSheet, 'utf8');
 

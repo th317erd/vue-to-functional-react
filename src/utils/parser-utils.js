@@ -2,11 +2,13 @@
 
 const HTMLParser  = require('htmlparser2');
 const FileSystem  = require('fs');
-const sass        = require('sass');
 
 function parseVueSFC(filePath) {
   let fileContents = FileSystem.readFileSync(filePath, 'utf8');
-  let dom = HTMLParser.parseDocument(fileContents);
+  let dom = HTMLParser.parseDocument(fileContents, {
+    //xml:                  true,
+    recognizeSelfClosing: true,
+  });
 
   let template;
   let script;
@@ -32,10 +34,8 @@ function parseVueSFC(filePath) {
   }
 
   if (style) {
-    let styleContent  = style.children[0].data;
-    let result        = sass.compileString(styleContent);
-
-    style = result.css + '\n';
+    let styleContent = style.children[0].data;
+    style = styleContent + '\n';
   }
 
   return {

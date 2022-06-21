@@ -1,3 +1,4 @@
+/* eslint-disable no-eval */
 'use strict';
 
 const Nife = require('nife');
@@ -14,13 +15,35 @@ function cleanComponentScript(scriptSource) {
 }
 
 function evalScript(rawScript) {
+  const mapState = (...args) => {
+    let obj = {};
+
+    let scopeName = args[0];
+    args[1].forEach((name) => {
+      obj[name] = eval(`(function() { return function ${name}() { /* TODO: mapped state... help! Scope: ${scopeName}.${name} */ }; })()`);
+    });
+
+    return obj;
+  };
+
   let script = cleanComponentScript(rawScript);
-  let references = [];
+  let references = [ 'mapState' ];
+  let finalScript;
 
   for (let i = 0; i < 200; i++) {
     try {
-      let finalScript = `(function(${references.join(',')}) { return ${script}; })(${references.map((ref) => `'${ref}'`)});`;
-      // eslint-disable-next-line no-eval
+      let curlyBraceIndex = script.indexOf('{');
+      finalScript = `${script.substring(0, curlyBraceIndex)}return ${script.substring(curlyBraceIndex)}`;
+
+      finalScript = `(function(${references.join(',')}) { \n${finalScript}; })(${references.map((ref) => {
+        if (ref === 'mapState')
+          return ref;
+
+        return `'${ref}'`;
+      })});`;
+
+      // console.log(finalScript);
+
       let result = eval(finalScript);
       return result;
     } catch (error) {
@@ -92,6 +115,7 @@ function convertValueToJS(_value, _depth) {
     return 'null';
 
   if (Nife.instanceOf(value, 'array', 'object')) {
+    let prefix  = getTabWidthForDepth(depth + 1);
     let keys    = Object.keys(value);
     let isArray = Array.isArray(value);
     let parts   = [];
@@ -111,13 +135,13 @@ function convertValueToJS(_value, _depth) {
       if (isArray)
         parts.push(convertedValue);
       else
-        parts.push(`'${keyValue}': ${convertedValue},`);
+        parts.push(`\n${prefix}'${key}': ${convertedValue},`);
     }
 
     if (isArray)
       parts.push(']');
     else
-      parts.push('}');
+      parts.push(`\n${getTabWidthForDepth(depth)}}`);
 
     return parts.join('');
   } else if (Nife.instanceOf(value, 'function')) {
