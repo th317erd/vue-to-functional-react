@@ -268,7 +268,7 @@ function parseCodeVariables(context, code, onlyThis) {
 
       let extra = '';
       if (parts.length > 1)
-        extra = `.${parts.slice(1).join('')}`;
+        extra = `.${parts.slice(1).join('.')}`;
 
       return `@@@PROP[${index}]@@@${extra}`;
     });
@@ -384,6 +384,7 @@ function mutateSourceCode(parsedResult, callback, insideJSX) {
   mutatedCode = mutatedCode.replace(/this\.\$enyxusUtils/g, 'EnyxusUtils')
     .replace(/this\.\$enyxusCmd/g, 'EnyxusCommands')
     .replace(/this\.\$emit/g, 'this.emit')
+    .replace(/\$emit/g, 'this.emit')
     .replace(/\bsetTimeout\b/g, 'this.debounce')
     .replace(/this\.\$refs\.([\w$_-]+)/g, (m, refName) => {
       return `this.getReference('$${refName}')`;
@@ -1103,7 +1104,7 @@ function convertToReact(inputPath, outputPath, parsedSFC) {
   let cssFullFileName = Path.join(filePath, 'styles.scss');
   let styleSheet      = (parsedSFC.style || '').replace(/^/gm, '  ');
 
-  styleSheet = `.${nameConverted} {\n${styleSheet}\n}`;
+  styleSheet = `.${nameConverted} {\n  ${styleSheet.trim()}\n}`;
   FileSystem.writeFileSync(cssFullFileName, styleSheet, 'utf8');
 
   let reactComponent = generateReactComponent(parsedSFC);
