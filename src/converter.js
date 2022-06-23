@@ -12,6 +12,11 @@ const {
   EventUtils,
 } = require('./utils');
 
+function trimMethodDepth(str, depth) {
+  let regex = new RegExp(`^ {${depth * 2}}`, 'gm');
+  return str.replace(regex, '');
+}
+
 function getOutputPathAndName(inputPath, outputPath, parsedSFC) {
   let fileName = Path.basename(parsedSFC.filePath);
   let name     = fileName.replace(/^([^.]+).*$/, '$1');
@@ -34,7 +39,27 @@ function getOutputPathAndName(inputPath, outputPath, parsedSFC) {
   };
 }
 
-function vueTypeToTSType(type) {
+function vueTypeToTSType(type, rawType) {
+  if (rawType) {
+    if (type == null)
+      return 'any /* TODO: Validate proper type */';
+
+    if (Nife.instanceOf(type, 'number'))
+      return 'number';
+    else if (Nife.instanceOf(type, 'boolean'))
+      return 'boolean';
+    else if (Nife.instanceOf(type, 'string'))
+      return 'string';
+    else if (Nife.instanceOf(type, 'bigint'))
+      return 'bigint';
+    else if (Nife.instanceOf(type, 'function'))
+      return 'any /* TODO: Please correct function type */';
+    else if (Nife.instanceOf(type, 'array'))
+      return 'Array<any> /* TODO: Validate proper type */';
+    else if (Nife.instanceOf(type, 'object'))
+      return 'Object /* TODO: Validate proper type */';
+  }
+
   if (type === String)
     return 'string';
   else if (type === Number)
@@ -57,7 +82,7 @@ function toPropName(name) {
   return MiscUtils.convertPropOrStateName(name);
 }
 
-function propsToTS(props, _depth) {
+function propsToTS(props, rawValues, _depth) {
   let depth           = _depth || 1;
   let isArray         = Array.isArray(props);
   let propNames       = Object.keys(props);
@@ -81,14 +106,14 @@ function propsToTS(props, _depth) {
       }
     }
 
-    if (Array.isArray(value)) {
-      let result = propsToTS(value, depth + 1);
+    if (!rawValues && Array.isArray(value)) {
+      let result = propsToTS(value, rawValues, depth + 1);
       interfaceParts.push(`${prefix}${newPropName}: Array<${result}>;\n`);
     } else {
-      if (isArray)
-        interfaceParts.push(vueTypeToTSType(value));
+      if (!rawValues && isArray)
+        interfaceParts.push(vueTypeToTSType(value, rawValues));
       else
-        interfaceParts.push(`${prefix}${newPropName}: ${vueTypeToTSType(value)};\n`);
+        interfaceParts.push(`${prefix}${newPropName}: ${vueTypeToTSType(value, rawValues)};\n`);
     }
   }
 
@@ -100,7 +125,14 @@ function propsToInterface(componentName, scriptObject) {
   if (!props || Array.isArray(props))
     return `export interface ${componentName}Props {}`;
 
-  return `export interface ${componentName}Props {${propsToTS(props)}};`;
+  return `export interface ${componentName}Props {${propsToTS(props, false)}};`;
+}
+
+function stateToInterface(componentName, state) {
+  if (Nife.isEmpty(state))
+    return `export interface ${componentName}State {}`;
+
+  return `export interface ${componentName}State {${propsToTS(state, true)}};`;
 }
 
 function getState(scriptObject) {
@@ -117,29 +149,23 @@ function toStateName(name) {
   return MiscUtils.convertPropOrStateName(name);
 }
 
-function generateStateCalls(state) {
-  if (Nife.isEmpty(state))
-    return '';
-
-  let stateNames  = Object.keys(state);
-  let stateParts  = [];
-
-  for (let i = 0, il = stateNames.length; i < il; i++) {
-    let stateName = stateNames[i];
-    let value     = state[stateName];
-    let newName   = toStateName(stateName);
-
-    stateParts.push(`  const [ ${newName}, set${Nife.capitalize(newName)} ] = useState(${MiscUtils.convertValueToJS(value)});`);
-  }
-
-  return stateParts.join('\n');
-}
-
 function toComputeName(name) {
   return MiscUtils.convertPropOrStateName(name);
 }
 
-function doMethodConversions(context, events) {
+function hasSourceCode(context, code) {
+  let { parsedCode } = parseCodeVariables(context, code);
+
+  let count = 0;
+
+  parsedCode.replace(/@@@(TAG|PROP)\[(\d+)\]@@@/g, () => {
+    count++;
+  });
+
+  return (count > 1);
+}
+
+function parseCodeVariables(context, code, onlyThis) {
   let {
     propNames,
     stateNames,
@@ -147,67 +173,196 @@ function doMethodConversions(context, events) {
     methodNames,
   } = context;
 
-  const doConversions = (name, equals, followingChar) => {
-    if (methodNames.indexOf(name) >= 0) {
-      if (events && followingChar !== '(')
-        return `${toMethodName(name)}(event)`;
-      else
-        return `${toMethodName(name)}`;
-    } else if (computedNames.indexOf(name) >= 0) {
-      if (equals)
-        return `computedState.${toComputeName(name)} = ${equals}`;
+  const getPropNameType = (name) => {
+    if (propNames.indexOf(name) >= 0)
+      return 'prop';
+    else if (stateNames.indexOf(name) >= 0)
+      return 'state';
+    else if (computedNames.indexOf(name) >= 0)
+      return 'computed';
+    else if (methodNames.indexOf(name) >= 0)
+      return 'method';
+  };
 
-      return `computedState.${toComputeName(name)}`;
-    } else if (stateNames.indexOf(name) >= 0) {
-      if (equals)
-        return `set${Nife.capitalize(toStateName(name))}(${equals})`;
+  const createTag = (tags, part) => {
+    let index = tags.length;
+    tags.push(part);
+    return `@@@TAG[${index}]@@@`;
+  };
 
-      return `${toStateName(name)}`;
-    } else if (propNames.indexOf(name) >= 0) {
-      return `props.${toPropName(name)}`;
+  const parseAssignment = (str) => {
+    let assignment;
+
+    str.replace(/^\s*([+*/-]?=)\s*([^=][^;]+)/, (m, operator, rightHand) => {
+      assignment = { operator: operator.trim(), rightHand: rightHand.trim() };
+    });
+
+    return assignment;
+  };
+
+  let allVariableNames = Nife.uniq(
+    Nife.arrayFlatten([
+      propNames,
+      stateNames,
+      computedNames,
+      methodNames,
+    ]),
+  );
+
+  allVariableNames.sort((a, b) => {
+    if (a.length === b.length)
+      return 0;
+
+    return (a.length < b.length) ? 1 : -1;
+  });
+
+  let variablesRegExp       = new RegExp(`(\\b${allVariableNames.join('\\b|\\b')}\\b)`, 'g');
+  let variablesRegExpSingle = new RegExp(`^(\\b${allVariableNames.join('\\b|\\b')}\\b)$`);
+  let matches = [];
+  let tags    = [];
+
+  let parsedCode = code
+    .replace(/(['"])(?:\\.|.)*?\1/g, (m) => createTag(tags, m))
+    .replace(/this\.([\w$.]+)/g, (m, reference, offset, src) => {
+      let parts = reference.split(/\./g);
+      let type;
+
+      if (parts[0] === 'props') {
+        type = 'prop';
+        parts = parts.slice(1);
+      }
+
+      if (!variablesRegExpSingle.test(parts[0]))
+        return createTag(tags, m);
+
+      let name = parts[0];
+      if (!type)
+        type = getPropNameType(name);
+
+      let index = matches.length;
+
+      matches.push({
+        assignment: parseAssignment(src.substring(offset + m.length)),
+        hasThis:    true,
+        length:     m.length,
+        offset,
+        type,
+        name,
+      });
+
+      return `@@@PROP[${index}]@@@`;
+    });
+
+  if (onlyThis !== true) {
+    console.log('Starting parse!', parsedCode);
+    parsedCode = parsedCode.replace(variablesRegExp, (m, name, offset, src) => {
+      console.log('MATCH: ', m);
+      let rewindOffset = offset - 1;
+      if (rewindOffset < 0)
+        rewindOffset = 0;
+
+      if ((/[.\]]/).test(src.charAt(rewindOffset)))
+        return createTag(tags, m);
+
+      rewindOffset = offset - 8;
+      if (rewindOffset < 0)
+        rewindOffset = 0;
+
+      if ((/^\s*(let|var|const)\s+/).test(src.substring(rewindOffset)))
+        return createTag(tags, m);
+
+      if ((/^\s*:/).test(src.substring(offset + m.length)))
+        return createTag(tags, m);
+
+      let type  = getPropNameType(name);
+      let index = matches.length;
+
+      matches.push({
+        assignment: parseAssignment(src.substring(offset + m.length)),
+        hasThis:    false,
+        length:     m.length,
+        index,
+        offset,
+        type,
+        name,
+      });
+
+      return `@@@PROP[${index}]@@@`;
+    });
+
+    if (code.match(/SVG_BASE/))
+      console.log('PARSED CODE: ', code, parsedCode, matches, variablesRegExp);
+  }
+
+  return { parsedCode, matches, tags };
+}
+
+function mutateSourceCode(parsedResult, callback) {
+  let {
+    parsedCode,
+    matches,
+    tags,
+  } = parsedResult;
+
+  const compileOutput = (match) => {
+    let {
+      assignment,
+      type,
+      name,
+      hasThis,
+    } = match;
+
+    if (type === 'method') {
+      return `this.${toMethodName(name)}`;
+    } else if (type === 'computed') {
+      if (assignment)
+        return `this.${toComputeName(name)}() /* TODO: Fixme... needs to be a state variable */`;
+
+      return `this.${toComputeName(name)}()`;
+    } else if (type === 'state') {
+      if (assignment)
+        return `this.state.${toStateName(name)}`;
+
+      return `this.state.${toStateName(name)}`;
+    } else if (type === 'prop') {
+      return `this.props.${toPropName(name)}`;
     }
 
-    if (equals)
-      return `${name} = ${equals}`;
+    if (hasThis)
+      return `this.${name}`;
 
     return name;
   };
 
-  return doConversions;
+  return parsedCode.replace(/@@@(TAG|PROP)\[(\d+)\]@@@/g, (tagMatch, tagType, _index, offset, source) => {
+    let index = parseInt(_index, 10);
+    if (tagType === 'TAG')
+      return tags[index];
+
+    let match   = matches[index];
+    let output  = compileOutput(match);
+
+    if (typeof callback === 'function') {
+      let result = callback({ match, output, tagMatch, offset, source, compileOutput });
+      if (result)
+        output = result;
+    }
+
+    return output;
+  }).replace(/this\.\$enyxusUtils/g, 'EnyxusUtils');
 }
 
 function convertInlineCode(context, code, events) {
-  const doConversions = doMethodConversions(context, events);
+  let result = parseCodeVariables(context, code, false);
+  return mutateSourceCode(result, ({ match, output }) => {
+    if (match.type !== 'method')
+      return output;
 
-  return code
-    .replace(/([.\W]|\b)([a-zA-Z$][\w$]*)\s*[+*/-]?=([^=][^;]+)/gm, (m, _prefix, name, _equals) => {
-      let prefix = _prefix.trim();
-      if (prefix && (/[.'"-]/).test(prefix))
-        return m;
+    if (events)
+      return `${output}(event);`;
 
-      if ((/^\s+$/).test(_prefix))
-        prefix = _prefix;
-
-      let equals = _equals;
-      if (equals)
-        equals = equals.trim();
-
-      return `${prefix}${doConversions(name, equals)}`;
-    })
-    .replace(/([.\W]|\b)([a-zA-Z$][\w$]*)/gm, (m, _prefix, name, offset, str) => {
-      let followingChar = str.charAt(offset + m.length);
-      if (followingChar === ':')
-        return m;
-
-      let prefix = _prefix.trim();
-      if (prefix && (/[.'"-]/).test(prefix))
-        return m;
-
-      if ((/^\s+$/).test(_prefix))
-        prefix = _prefix;
-
-      return `${prefix}${doConversions(name, false, followingChar)}`;
-    });
+    return output;
+  });
 }
 
 function convertMethod(context, func, stripPrefix, convertMethodToArrow) {
@@ -222,19 +377,8 @@ function convertMethod(context, func, stripPrefix, convertMethodToArrow) {
     funcStr = parts.join('\n');
   }
 
-  const doConversions = doMethodConversions(context);
-
-  return funcStr
-    .replace(/(this\.)([a-zA-Z$][\w$]*)\s*[+*/-]?=([^=][^;]+)/gm, (m, prefix, name, _equals) => {
-      let equals = _equals;
-      if (equals)
-        equals = equals.trim();
-
-      return `${prefix}${doConversions(name, equals)}`;
-    })
-    .replace(/(this\.)([\w$]+)/g, (m, prefix, name) => {
-      return `${prefix}${doConversions(name)}`;
-    });
+  let result = parseCodeVariables(context, funcStr, true);
+  return mutateSourceCode(result);
 }
 
 function getComputedNames(scriptObject) {
@@ -251,7 +395,7 @@ function generateComputed(context, scriptObject) {
     return '';
 
   let computedNames = context.computedNames;
-  let computedParts = [ '  const computedState = ComponentUtils.createComputedState({' ];
+  let computedParts = [];
 
   for (let i = 0, il = computedNames.length; i < il; i++) {
     let computeName = computedNames[i];
@@ -262,14 +406,12 @@ function generateComputed(context, scriptObject) {
     }) : convertMethod(context, value, true);
 
     if (isFunction)
-      computedParts.push(`    '${toComputeName(computeName)}': () => ${funcBody},`);
+      computedParts.push(`  ${toComputeName(computeName)} = () => ${trimMethodDepth(funcBody, 1)};\n\n`);
     else
-      computedParts.push(`    '${toComputeName(computeName)}': ${funcBody},`);
+      computedParts.push(`  ${toComputeName(computeName)} = ${trimMethodDepth(funcBody, 1)}; /* TODO: Fix me (computed state as object) */\n\n`);
   }
 
-  computedParts.push('  });');
-
-  return computedParts.join('\n');
+  return `  /* START COMPUTED */\n${computedParts.join('').trimEnd()}\n  /* END COMPUTED */\n`;
 }
 
 function getMethodNames(scriptObject) {
@@ -299,10 +441,10 @@ function generateMethods(context, scriptObject) {
 
     funcBody = funcBody.replace(/^[\w$]+/, `${toMethodName(methodName)} = `);
 
-    methodParts.push(`  const ${funcBody};\n`);
+    methodParts.push(`  ${trimMethodDepth(funcBody, 1)};\n`);
   }
 
-  return methodParts.join('\n');
+  return `  /* START METHODS */\n${methodParts.join('\n').trimEnd()}\n  /* END METHODS */\n`;
 }
 
 function convertAttributeNameToJSXName(name) {
@@ -323,7 +465,7 @@ function attributesToJSX(context, node, attributes, _depth) {
   let attributeNames  = Object.keys(attributes);
   let attributeParts  = [];
   let finalAttributes = {};
-  let prefix          = MiscUtils.getTabWidthForDepth(depth + 2);
+  let prefix          = MiscUtils.getTabWidthForDepth(depth + 1);
 
   for (let i = 0, il = attributeNames.length; i < il; i++) {
     let attributeName   = attributeNames[i];
@@ -354,7 +496,7 @@ function attributesToJSX(context, node, attributes, _depth) {
         comment = ' /* TODO: WARNING: This was a special binding... please refer to the Vue code to correct this event method */';
 
       propName = reactEventName;
-      value = `(event: any) => { ${value} }${comment}`;
+      value = `{(event: any) => { ${value} }${comment}}`;
     } else {
       propName  = convertAttributeNameToJSXName(attributeName);
       value     = attributeValue;
@@ -367,6 +509,10 @@ function attributesToJSX(context, node, attributes, _depth) {
       if (propName === 'v-model')
         value = value + ' /* TODO: Dual binding from child to parent */';
     }
+
+    let isSource  = hasSourceCode(context, attributeValue);
+    if (propName !== 'className' && !(/^\{\{|^\{\(/).test(value) && (isSource || !(/^['"]/).test(value)))
+      value = `{${value.replace(/\n\s*/g, ' ')}}`;
 
     if (!propName || !value)
       continue;
@@ -388,13 +534,10 @@ function attributesToJSX(context, node, attributes, _depth) {
       if (node.parent && node.parent.name === 'template')
         values = Nife.uniq([].concat(values));
 
-      value = `classNames(${values.join(', ')})`;
+      value = `{classNames(${values.join(', ')})}`;
     } else {
       value = values.join(', ');
     }
-
-    if (!(/^['"]/).test(value) || !(/['"]$/).test(value))
-      value = `{${value.replace(/\n\s*/g, ' ')}}`;
 
     attributeParts.push(`${propName}=${value}`);
   }
@@ -410,50 +553,160 @@ function attributesToJSX(context, node, attributes, _depth) {
   }
 }
 
-function generateJSXFromDOM(context, nodes, _incomingNodeContext) {
+function getIfAttribute(attributes) {
+  let attributeNames = Object.keys(attributes);
+  for (let i = 0, il = attributeNames.length; i < il; i++) {
+    let attributeName = attributeNames[i];
+    if ((/^(v-if|v-else-if|v-else|v-show)/).test(attributeName))
+      return { type: attributeName, value: attributes[attributeName] };
+  }
+}
+
+function getForAttribute(context, attributes) {
+  const parseForLoop = (value) => {
+    let name;
+    let indexName;
+    let sourceName;
+
+    if (value.charAt(0) === '(') {
+      value.replace(/\(\s*([\w$]+),\s*([\w$]+)\s*\)\s+in\s+([\w$.]+)/i, (m, _name, _indexName, _sourceName) => {
+        name = _name;
+        indexName = _indexName;
+        sourceName = _sourceName;
+      });
+    } else {
+      value.replace(/([\w$]+)\s+in\s+([\w$.]+)/i, (m, _name, _sourceName) => {
+        name = _name;
+        sourceName = _sourceName;
+      });
+    }
+
+    if (sourceName)
+      sourceName = convertInlineCode(context, sourceName);
+
+    if (sourceName.match(/^\d+$/)) {
+      let items = [];
+      sourceName = parseInt(sourceName, 10);
+      for (let i = 0; i < sourceName; i++)
+        items.push(i);
+
+      sourceName = `[ ${items.join(', ')} ]`;
+    }
+
+    return { name, indexName, sourceName };
+  };
+
+  let attributeNames = Object.keys(attributes);
+  for (let i = 0, il = attributeNames.length; i < il; i++) {
+    let attributeName = attributeNames[i];
+    if (attributeName === 'v-for') {
+      let attributeValue  = attributes[attributeName];
+      let parsed          = parseForLoop(attributeValue);
+
+      let keyValue = attributes[':key'];
+      if (Nife.isEmpty(keyValue) && parsed.indexName)
+        keyValue = parsed.indexName;
+
+      parsed.key = keyValue;
+
+      return parsed;
+    }
+  }
+}
+
+function filterDOMNodes(nodes, insideJSX) {
+  return nodes.filter((node) => {
+    if (node.type === 'text') {
+      if (!insideJSX)
+        return false;
+
+      if (Nife.isEmpty(node.data))
+        return false;
+
+      return true;
+    } else {
+      return true;
+    }
+  });
+}
+
+function iterateHTMLNodes(callback, _incomingNodeContext) {
+  let incomingNodeContext = Object.assign({}, _incomingNodeContext || {});
+  let depth               = incomingNodeContext.depth || 0;
+  let insideJSX           = incomingNodeContext.insideJSX || false;
+  let results             = [];
+  let firstChild          = true;
+  let insideIf            = false;
+  let nodes               = incomingNodeContext.nodes;
+  let filteredNodes       = filterDOMNodes(nodes, insideJSX);
+
+  let nodeContext = Object.assign({ nodeIndex: 0 }, incomingNodeContext, {
+    depth,
+    insideJSX,
+    insideIf,
+    firstChild,
+  });
+
+  let filteredNodesLength = filteredNodes.length;
+  for (; nodeContext.nodeIndex < filteredNodesLength; nodeContext.nodeIndex++) {
+    let node = filteredNodes[nodeContext.nodeIndex];
+    if (node.type !== 'tag')
+      continue;
+
+    let nodeName = node.name;
+    let isTemplate = false;
+
+    if (nodeName === 'template') {
+      nodeName = 'div';
+      isTemplate = true;
+    } else if (nodeName.indexOf('-') >= 0) {
+      nodeName = Nife.capitalize(MiscUtils.convertPropOrStateName(nodeName));
+    }
+
+    let attributes = node.attribs || {};
+    let lastChild = ((nodeContext.nodeIndex + 1) >= filteredNodesLength);
+
+    nodeContext = Object.assign(nodeContext, {
+      node,
+      nodeName,
+      attributes,
+      lastChild,
+      firstChild,
+      isTemplate,
+    });
+
+    let result = callback(results, nodeContext);
+    if (result)
+      return result;
+
+    firstChild = false;
+  }
+
+  return results.join('');
+}
+
+function generateJSXFromDOM(nodes, incomingNodeContext) {
   if (Nife.isEmpty(nodes))
     return '';
 
-  const constructNode = (results, nodeContext) => {
+  const constructNode = (nodeContext) => {
     let {
+      context,
+      depth,
       attributes,
       node,
       nodeName,
-      prefix,
-      firstChild,
-      lastChild,
-      insideIf,
-      lastNodeWasIf,
     } = nodeContext;
 
-    let resultContext = {};
-
-    if (!firstChild && !insideIf)
-      results.push('\n');
-
-    let ifResult = handleIfStatement(results, nodeContext);
-    if (ifResult) {
-      if (lastChild)
-        results.push(`\n${prefix}})()}\n\n`);
-
-      return { lastNodeWasIf: true };
-    } else if (lastNodeWasIf) {
-      if (ifResult !== 'NO_END')
-        results.push(`\n${prefix}})()}\n\n`);
-
-      nodeContext.lastNodeWasIf  = false;
-      resultContext.lastNodeWasIf = false;
-    }
-
-    if (handleForLoop(results, nodeContext))
-      return resultContext;
+    let prefix = MiscUtils.getTabWidthForDepth(depth);
+    let results = [];
 
     results.push(`${prefix}<${nodeName}`);
 
     if (nodeContext.isTemplate)
       results.push(' /* TODO: Was template = true */ ');
 
-    let attributesStr = attributesToJSX(context, node, attributes, depth + 1);
+    let attributesStr = attributesToJSX(context, node, attributes, depth);
     if (Nife.isNotEmpty(attributesStr)) {
       results.push(' ');
       results.push(attributesStr);
@@ -465,7 +718,7 @@ function generateJSXFromDOM(context, nodes, _incomingNodeContext) {
       let value = convertInlineCode(context, attributes['v-text'], false);
       childrenStr = `  ${MiscUtils.getTabWidthForDepth(depth + 2)}{${value}}\n`;
     } else {
-      childrenStr = generateJSXFromDOM(context, node.children || [], Object.assign({}, nodeContext, { depth: depth + 1 }));
+      childrenStr = generateJSXFromDOM(node.children || [], Object.assign({}, nodeContext, { depth: depth + 1, nodeIndex: 0 }));
     }
 
     if (Nife.isNotEmpty(childrenStr)) {
@@ -487,143 +740,87 @@ function generateJSXFromDOM(context, nodes, _incomingNodeContext) {
       }
     }
 
-    return resultContext;
+    return results.join('');
   };
 
-  const getIfAttribute = (attributes) => {
-    let attributeNames = Object.keys(attributes);
-    for (let i = 0, il = attributeNames.length; i < il; i++) {
-      let attributeName = attributeNames[i];
-      if ((/^(v-if|v-else-if|v-else|v-show)/).test(attributeName))
-        return { type: attributeName, value: attributes[attributeName] };
-    }
-  };
+  const handleIfStatement = (outerNodeContext) => {
+    return iterateHTMLNodes((results, nodeContext) => {
+      let {
+        context,
+        depth,
+        attributes,
+        node,
+        lastChild,
+      } = nodeContext;
 
-  const getForAttribute = (attributes) => {
-    const parseForLoop = (value) => {
-      let name;
-      let indexName;
-      let sourceName;
+      let prefix = MiscUtils.getTabWidthForDepth(depth);
 
-      if (value.charAt(0) === '(') {
-        value.replace(/\(\s*([\w$]+),\s*([\w$]+)\s*\)\s+in\s+([\w$.]+)/i, (m, _name, _indexName, _sourceName) => {
-          name = _name;
-          indexName = _indexName;
-          sourceName = _sourceName;
-        });
-      } else {
-        value.replace(/([\w$]+)\s+in\s+([\w$.]+)/i, (m, _name, _sourceName) => {
-          name = _name;
-          sourceName = _sourceName;
-        });
+      let ifAttribute = getIfAttribute(attributes);
+      if (!ifAttribute) {
+        if (nodeContext.nodeIndex > outerNodeContext.nodeIndex) {
+          results.push(`\n${prefix}})()}\n\n`);
+          outerNodeContext.nodeIndex = nodeContext.nodeIndex - 1;
+        }
+
+        return results.join('');
       }
 
-      if (sourceName)
-        sourceName = convertInlineCode(context, sourceName);
+      let type            = ifAttribute.type;
+      let isShow          = (type === 'v-show');
+      let value           = convertInlineCode(context, ifAttribute.value);
+      let innerPrefix     = MiscUtils.getTabWidthForDepth(depth + 1);
+      let innerPrefix2    = MiscUtils.getTabWidthForDepth(depth + 2);
 
-      if (sourceName.match(/^\d+$/)) {
-        let items = [];
-        sourceName = parseInt(sourceName, 10);
-        for (let i = 0; i < sourceName; i++)
-          items.push(i);
+      if (type === 'v-if' || type === 'v-show')
+        type = 'if';
+      else if (type === 'v-else-if')
+        type = 'else if';
+      else if (type === 'v-else')
+        type = 'else';
 
-        sourceName = `[ ${items.join(', ')} ]`;
+      if (type === 'if') {
+        if (nodeContext.nodeIndex > outerNodeContext.nodeIndex) {
+          // This isn't the first if statement
+          // and we are encountering another one...
+          // So close this if statement, and let
+          // another loop handle this one
+          results.push(`\n${prefix}})()}\n`);
+          outerNodeContext.nodeIndex = nodeContext.nodeIndex - 1;
+          return results.join('');
+        }
+
+        results.push(`${prefix}{(() => {\n`);
       }
 
-      return { name, indexName, sourceName };
-    };
+      let condition;
 
-    let attributeNames = Object.keys(attributes);
-    for (let i = 0, il = attributeNames.length; i < il; i++) {
-      let attributeName = attributeNames[i];
-      if (attributeName === 'v-for') {
-        let attributeValue  = attributes[attributeName];
-        let parsed          = parseForLoop(attributeValue);
+      if (type !== 'else')
+        condition = ` (${value}) `;
+      else
+        condition = ' ';
 
-        let keyValue = attributes[':key'];
-        if (Nife.isEmpty(keyValue) && parsed.indexName)
-          keyValue = parsed.indexName;
+      results.push(`${(type !== 'if') ? ' ' : innerPrefix}${type}${condition}{\n`);
+      let innerResult = constructNode(Object.assign({}, nodeContext, { node, depth: depth + 3 }));
 
-        parsed.key = keyValue;
+      if (Nife.isEmpty(innerResult))
+        results.push(`${innerPrefix2}return null;`);
+      else
+        results.push(`${innerPrefix2}return (\n${innerResult}${innerPrefix2});`);
 
-        return parsed;
+      results.push(`\n${innerPrefix}}`);
+
+      if (lastChild || isShow) {
+        results.push(`\n${prefix}})()}\n`);
+        outerNodeContext.nodeIndex = nodeContext.nodeIndex;
+        return results.join('');
       }
-    }
-  };
-
-  const handleIfStatement = (results, nodeContext) => {
-    let {
-      prefix,
-      attributes,
-      node,
-      insideIf,
-      lastChild,
-      lastNodeWasIf,
-    } = nodeContext;
-
-    let ifAttribute = getIfAttribute(attributes);
-    if (!ifAttribute) {
-      if (insideIf) {
-        insideIf = false;
-
-        results.push(`\n${prefix}})()}\n\n`);
-      }
-
-      return;
-    }
-
-    if (nodeContext.ignoreIfStatements === true)
-      return;
-
-    let type          = ifAttribute.type;
-    let isShow        = (type === 'v-show');
-    let value         = convertInlineCode(context, ifAttribute.value);
-    let innerPrefix   = MiscUtils.getTabWidthForDepth(depth + 3);
-    let innerPrefix2  = MiscUtils.getTabWidthForDepth(depth + 4);
-    let innerPrefix3  = MiscUtils.getTabWidthForDepth(depth + 5);
-
-    if (type === 'v-if' || type === 'v-show')
-      type = 'if';
-    else if (type === 'v-else-if')
-      type = 'else if';
-    else if (type === 'v-else')
-      type = 'else';
-
-    if (type === 'if') {
-      if (insideIf || lastNodeWasIf)
-        results.push(`\n${prefix}})()}\n\n`);
-
-      insideIf = (isShow) ? 'v-show' : 'v-if';
-
-      results.push(`\n${prefix}{(() => {\n`);
-    }
-
-    let condition;
-
-    if (type !== 'else')
-      condition = ` (${value}) `;
-    else
-      condition = ' ';
-
-    results.push(`${(type !== 'if') ? ' ' : innerPrefix}${type}${condition}{\n`);
-    let innerResult = generateJSXFromDOM(context, [ node ], Object.assign({}, nodeContext, { depth: depth + 4, ignoreIfStatements: true, insideIf: true, lastNodeWasIf: false }));
-
-    if (Nife.isEmpty(innerResult))
-      results.push(`${innerPrefix2}return null;`);
-    else
-      results.push(`${innerPrefix2}return (\n${innerPrefix3}<React.Fragment>\n${innerResult}${innerPrefix3}</React.Fragment>\n${innerPrefix2});`);
-
-    results.push(`\n${innerPrefix}}`);
-
-    // if (lastChild)
-    //   results.push(`\n${prefix}})()}\n\n`);
-
-    return (isShow) ? 'NO_END' : true;
+    }, outerNodeContext);
   };
 
   const handleForLoop = (results, nodeContext) => {
     let {
-      prefix,
+      depth,
+      context,
       attributes,
       node,
       ignoreForLoop,
@@ -632,7 +829,9 @@ function generateJSXFromDOM(context, nodes, _incomingNodeContext) {
     if (ignoreForLoop)
       return;
 
-    let forAttribute = getForAttribute(attributes);
+    let prefix = MiscUtils.getTabWidthForDepth(depth);
+
+    let forAttribute = getForAttribute(context, attributes);
     if (!forAttribute)
       return;
 
@@ -641,7 +840,7 @@ function generateJSXFromDOM(context, nodes, _incomingNodeContext) {
     let innerPrefix     = MiscUtils.getTabWidthForDepth(depth + 3);
 
     forLoopResults.push(`\n${prefix}{${forAttribute.sourceName}.map((${args}) => {\n`);
-    let innerResult = generateJSXFromDOM(context, [ node ], Object.assign({}, nodeContext, { depth: depth + 2, ignoreForLoop: true }));
+    let innerResult = constructNode(Object.assign({}, nodeContext, { node, depth: depth + 2 }));
 
     if (Nife.isEmpty(innerResult))
       forLoopResults.push(`${innerPrefix}return null;`);
@@ -656,81 +855,41 @@ function generateJSXFromDOM(context, nodes, _incomingNodeContext) {
 
   // v-html = v-text, but for html
 
-  let incomingNodeContext = Object.assign({}, _incomingNodeContext || {});
-  let depth               = incomingNodeContext.depth || 0;
-  let insideJSX           = incomingNodeContext.insideJSX || false;
-  let results             = [];
-  let prefix              = MiscUtils.getTabWidthForDepth(depth + 2);
-  let firstChild          = true;
-  let insideIf            = false;
-  let filteredNodes       = nodes.filter((node) => {
-    if (node.type === 'text') {
-      if (!insideJSX)
-        return false;
-
-      if (Nife.isEmpty(node.data))
-        return false;
-
-      return true;
-    } else {
-      return true;
-    }
-  });
-
-  let nodeContext = Object.assign({}, incomingNodeContext, {
-    depth,
-    insideJSX,
-    insideIf,
-    firstChild,
-    prefix,
-  });
-
-  for (let i = 0, il = filteredNodes.length; i < il; i++) {
-    let node = filteredNodes[i];
-    if (node.type !== 'tag')
-      continue;
-
-    let nodeName = node.name;
-    let isTemplate = false;
-
-    if (nodeName === 'template') {
-      // results.push(generateJSXFromDOM(context, node.children, depth + 1, true));
-      // continue;
-
-      nodeName = 'div';
-      isTemplate = true;
-    } else if (nodeName.indexOf('-') >= 0) {
-      nodeName = Nife.capitalize(MiscUtils.convertPropOrStateName(nodeName));
-    }
-
-    let attributes = node.attribs;
-    let lastChild = ((i + 1) >= filteredNodes.length);
-
-    nodeContext = Object.assign(nodeContext, {
-      node,
-      nodeName,
+  return iterateHTMLNodes((results, nodeContext) => {
+    let {
       attributes,
-      lastChild,
       firstChild,
-      isTemplate,
-    });
+    } = nodeContext;
 
-    let result = constructNode(results, nodeContext);
+    if (!firstChild)
+      results.push('\n');
+
+    let ifAttribute = getIfAttribute(attributes);
+    if (ifAttribute) {
+      let result = handleIfStatement(nodeContext);
+      results.push(result);
+      return;
+    }
+
+    if (handleForLoop(results, nodeContext))
+      return;
+
+    let result = constructNode(nodeContext);
     if (result)
-      Object.assign(nodeContext, result);
-
-    firstChild = false;
-  }
-
-  return results.join('');
+      results.push(result);
+  }, Object.assign({}, incomingNodeContext || {}, { nodes, nodeIndex: 0 }));
 }
 
 function generateRenderMethod(context, template) {
   if (!template)
     return '  return null;';
 
-  let jsx = generateJSXFromDOM(context, [ template ]);
-  return `  return (\n${jsx}\n  );`;
+  let jsx = generateJSXFromDOM([ template ], { depth: 3, context });
+  return `  return (\n${jsx}    );`;
+}
+
+function generateState(state) {
+  return MiscUtils.convertValueToJS(MiscUtils.convertObjectKeys(state, toStateName), 2);
 }
 
 function generateReactComponent(parsedSFC) {
@@ -738,34 +897,47 @@ function generateReactComponent(parsedSFC) {
   let convertedComponentName  = parsedSFC.convertedComponentName;
   let scriptObject            = MiscUtils.evalScript(parsedSFC.script);
   let propsInterface          = propsToInterface(componentName, scriptObject);
-  let state                   = getState(scriptObject);
   let propNames               = Object.keys(scriptObject.props || {});
+  let state                   = getState(scriptObject);
+  let stateInterface          = stateToInterface(componentName, state);
   let stateNames              = Object.keys(state || {});
   let computedNames           = getComputedNames(scriptObject);
   let methodNames             = getMethodNames(scriptObject);
   let context                 = { propNames, stateNames, computedNames, methodNames, componentName, convertedComponentName };
-  let stateCalls              = generateStateCalls(state);
+  // let stateCalls              = generateStateCalls(state);
   let computeMethods          = generateComputed(context, scriptObject);
   let methods                 = generateMethods(context, scriptObject);
   let renderJSX               = generateRenderMethod(context, parsedSFC.template);
+  let hasEnyxusUtils          = (/this\.\$enyxusUtils/g).test(parsedSFC.script);
+
   // TODO: Handle scriptSetup
 
   return `
-import React, { useState, useEffect } from 'react';
+import React from 'react';
 import classNames from 'classnames';
-import ComponentUtils from '@utils/component-utils';
-import './styles.sass';
+${(hasEnyxusUtils) ? 'import EnyxusUtils from \'@utils/enyxus-utils\';\n' : '\n'}import ComponentUtils from '@utils/component-utils';
+import './styles.scss';
 
 ${propsInterface}
 
-export default function ${componentName}(props: ${componentName}Props) {
+${stateInterface}
+
+export default class ${componentName} extends React.PureComponent {
+  props: ${componentName}Props;
+  state: ${componentName}State;
+
+  constructor(props: ${componentName}Props, ...args) {
+    super(props, ...args);
+
+    this.state = ComponentUtils.createState(${generateState(state)});
+  }
+
 ${methods}
 
 ${computeMethods}
-
-${stateCalls}
-
-${renderJSX}
+  render() {
+  ${renderJSX}
+  }
 }
 `;
 }
@@ -776,7 +948,7 @@ function convertToReact(inputPath, outputPath, parsedSFC) {
   parsedSFC.componentName = name;
   parsedSFC.convertedComponentName = nameConverted;
 
-  let cssFullFileName = Path.join(filePath, 'styles.sass');
+  let cssFullFileName = Path.join(filePath, 'styles.scss');
   let styleSheet      = parsedSFC.style || '';
   FileSystem.writeFileSync(cssFullFileName, styleSheet, 'utf8');
 

@@ -25,9 +25,9 @@ function parseVueSFC(filePath) {
       let attributes = child.attribs;
 
       if (attributes && Object.prototype.hasOwnProperty.call(attributes, 'setup'))
-        scriptSetup = child.children[0].data;
+        scriptSetup = child.children[0].data.replace(/\t/g, '  ');
       else
-        script = child.children[0].data;
+        script = child.children[0].data.replace(/\t/g, '  ');
     } else if (child.name === 'style') {
       style = child;
     }
