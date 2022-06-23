@@ -1,7 +1,7 @@
 import React from 'react';
 import ReactDOM from 'react-dom';
 
-export default class ComponentBase extends React.PureComponent {
+export default class ComponentBase<P, S> extends React.PureComponent<P, S> {
   constructor(...args) {
     super(...args);
 

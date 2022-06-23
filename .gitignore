@@ -104,3 +104,5 @@ dist
 .tern-port
 
 temp
+*.zip
+conversion-test

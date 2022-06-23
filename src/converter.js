@@ -113,7 +113,7 @@ function propsToTS(props, rawValues, _depth) {
 
     if (!rawValues && Array.isArray(value)) {
       let result = propsToTS(value, rawValues, depth + 1);
-      interfaceParts.push(`${prefix}${newPropName}: Array<${result}>;\n`);
+      interfaceParts.push(`${prefix}${newPropName}: ${result};\n`);
     } else {
       if (!rawValues && isArray)
         interfaceParts.push(vueTypeToTSType(value, rawValues));
@@ -1067,12 +1067,9 @@ ${propsInterface}
 
 ${stateInterface}
 
-export default class ${componentName} extends ComponentBase {
-  props: ${componentName}Props;
-  state: ${componentName}State;
-
-  constructor(props: ${componentName}Props, ...args) {
-    super(props, ...args);
+export default class ${componentName} extends ComponentBase<${componentName}Props, ${componentName}State> {
+  constructor(...args) {
+    super(...args);
 
     this.state = ${generateState(state)};
     ${generateCreatedHook(context, scriptObject)}

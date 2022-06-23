@@ -6,7 +6,6 @@ const FileSystem  = require('fs');
 function parseVueSFC(filePath) {
   let fileContents = FileSystem.readFileSync(filePath, 'utf8');
   let dom = HTMLParser.parseDocument(fileContents, {
-    //xml:                  true,
     recognizeSelfClosing:     true,
     lowerCaseTags:            false,
     lowerCaseAttributeNames:  false,
@@ -15,7 +14,7 @@ function parseVueSFC(filePath) {
   let template;
   let script;
   let scriptSetup;
-  let style;
+  let style = '';
 
   let children = dom.children;
   for (let i = 0, il = children.length; i < il; i++) {
@@ -31,13 +30,9 @@ function parseVueSFC(filePath) {
       else
         script = child.children[0].data.replace(/\t/g, '  ');
     } else if (child.name === 'style') {
-      style = child;
+      let styleContent = child.children[0].data;
+      style = `${style}${styleContent}\n`;
     }
-  }
-
-  if (style) {
-    let styleContent = style.children[0].data;
-    style = styleContent + '\n';
   }
 
   return {
