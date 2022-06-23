@@ -485,7 +485,10 @@ function generateMethods(context, scriptObject) {
     let value       = methods[methodName];
     let funcBody    = convertMethod(context, value, false, true);
 
-    funcBody = funcBody.replace(/^[\w$]+/, `${toMethodName(methodName)} = `);
+    if (funcBody.match(/^\s*(function\s+)?(state|action|getter)\(/))
+      funcBody = funcBody.replace(/^\s*(function\s+)?[\w$]+\s*\(\s*\)\s*/, `${toMethodName(methodName)} = () => `);
+    else
+      funcBody = funcBody.replace(/^\s*(function\s+)?[\w$]+/, `${toMethodName(methodName)} = `);
 
     methodParts.push(`  ${trimMethodDepth(funcBody, 1)};\n`);
   }
@@ -526,9 +529,12 @@ function attributesToJSX(context, node, attributes, _depth) {
     let propName        = undefined;
     let value           = undefined;
 
-    if ((/^(v-text|v-html|v-for|v-if|v-else-if|v-else|v-show)/).test(attributeName)) {
+    if ((/^(v-text|v-for|v-if|v-else-if|v-else|v-show)/).test(attributeName)) {
       // Handled at the JSX level
       continue;
+    } else if (attributeName === 'v-html') {
+      propName  = 'dangerouslySetInnerHTML';
+      value     = `{ __html: ${attributeValue} }`;
     } else if ((/^v-bind:/).test(attributeName)) {
       propName  = convertAttributeNameToJSXName(attributeName.replace(/^v-bind:/, ''));
       value     = attributeValue;
@@ -926,8 +932,6 @@ function generateJSXFromDOM(nodes, incomingNodeContext) {
     return true;
   };
 
-  // v-html = v-text, but for html
-
   return iterateHTMLNodes((results, nodeContext) => {
     let {
       attributes,
@@ -999,6 +1003,35 @@ function generateComputeVariables(computedNames) {
   return parts.join('');
 }
 
+function generateCreatedHook(context, scriptObject) {
+  if (!scriptObject || !scriptObject.created)
+    return '';
+
+  return `\n    (function ${convertMethod(context, '' + scriptObject.created).replace(/^/gm, '  ').trim()}).call(this);\n`;
+}
+
+function generateMountedHook(context, scriptObject) {
+  if (!scriptObject || !scriptObject.mounted)
+    return '';
+
+  return `  componentDidMount() {\n    (function ${convertMethod(context, '' + scriptObject.mounted).replace(/^/gm, '  ').trim()}).call(this);\n  }`;
+}
+
+function generateUnmountedHook(context, scriptObject) {
+  if (!scriptObject || !(scriptObject.destroyed || scriptObject.unmounted))
+    return '';
+
+  let parts = [];
+
+  if (scriptObject.unmounted)
+    parts.push(`    (function ${convertMethod(context, '' + scriptObject.unmounted).replace(/^/gm, '  ').trim()}).call(this);`);
+
+  if (scriptObject.destroyed)
+    parts.push(`    (function ${convertMethod(context, '' + scriptObject.destroyed).replace(/^/gm, '  ').trim()}).call(this);`);
+
+  return `  componentWillUnmount() {\n${parts.join('\n')}\n  }`;
+}
+
 function generateReactComponent(parsedSFC) {
   let componentName           = parsedSFC.componentName;
   let convertedComponentName  = parsedSFC.convertedComponentName;
@@ -1026,7 +1059,7 @@ function generateReactComponent(parsedSFC) {
   return `
 import React from 'react';
 import classNames from 'classnames';
-import ComponentBase from '@base/component-base';${(hasEnyxusUtils) ? '\nimport EnyxusUtils from \'@utils/enyxus-utils\';\n' : ''}${(hasEnyxusCmd) ? '\nimport EnyxusCommands from \'@utils/enyxus-cmd\';\n' : ''}
+import ComponentBase from '@components/base/component-base';${(hasEnyxusUtils) ? '\nimport EnyxusUtils from \'@utils/enyxus-utils\';\n' : ''}${(hasEnyxusCmd) ? '\nimport EnyxusCommands from \'@utils/enyxus-cmd\';\n' : ''}
 import './styles.scss';
 
 ${propsInterface}
@@ -1041,7 +1074,12 @@ export default class ${componentName} extends ComponentBase {
     super(props, ...args);
 
     this.state = ${generateState(state)};
+    ${generateCreatedHook(context, scriptObject)}
   }
+
+${generateMountedHook(context, scriptObject)}
+
+${generateUnmountedHook(context, scriptObject)}
 
 ${watchMethods}
 
