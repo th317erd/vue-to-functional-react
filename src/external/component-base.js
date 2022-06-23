@@ -27,7 +27,7 @@ export default class ComponentBase extends React.PureComponent {
         value:        {},
       },
       'state': {
-        enumberable:  false,
+        enumerable:  false,
         configurable: false,
         get: () => {
           return internalState;
@@ -55,7 +55,7 @@ export default class ComponentBase extends React.PureComponent {
 
       Object.defineProperties(state, {
         [fieldName]: {
-          enumberable:  false,
+          enumerable:  false,
           configurable: false,
           get: () => {
             return internalState[fieldName];
