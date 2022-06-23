@@ -28,14 +28,17 @@ function getOutputPathAndName(inputPath, outputPath, parsedSFC) {
   let outputDir       = Path.dirname(outputFilePath);
   let nameConverted   = MiscUtils.toHyphenated(name);
 
+  if (!nameConverted.startsWith('enyxus-'))
+    nameConverted = `enyxus-${nameConverted}`;
+
   let filePath = Path.join(outputDir, nameConverted);
   FileSystem.mkdirSync(filePath, { recursive: true });
 
   return {
     fullFileName: Path.join(outputDir, nameConverted, `${nameConverted}.tsx`),
+    name:         Nife.capitalize(Nife.snakeCaseToCamelCase(nameConverted.replace(/-+/g, '_'))),
     filePath,
     nameConverted,
-    name,
   };
 }
 
@@ -44,7 +47,9 @@ function vueTypeToTSType(type, rawType) {
     if (type == null)
       return 'any /* TODO: Validate proper type */';
 
-    if (Nife.instanceOf(type, 'number'))
+    if (type instanceof Date)
+      return 'Date';
+    else if (Nife.instanceOf(type, 'number'))
       return 'number';
     else if (Nife.instanceOf(type, 'boolean'))
       return 'boolean';
@@ -301,12 +306,14 @@ function parseCodeVariables(context, code, onlyThis) {
 
       return `@@@PROP[${index}]@@@`;
     });
+
+    // console.log('Parsed code ', code, parsedCode, matches, variablesRegExp);
   }
 
   return { parsedCode, matches, tags };
 }
 
-function mutateSourceCode(parsedResult, callback) {
+function mutateSourceCode(parsedResult, callback, insideJSX) {
   let {
     parsedCode,
     matches,
@@ -325,14 +332,22 @@ function mutateSourceCode(parsedResult, callback) {
     if (type === 'method') {
       return `this.${toMethodName(name)}`;
     } else if (type === 'computed') {
-      let value = `this.${toComputeName(name)}`;
-      if (assignment)
-        value = `${value} /* TODO: Fixme... needs to be a state variable */`;
+      if (insideJSX) {
+        let value = `computed${Nife.capitalize(toComputeName(name))}`;
+        if (assignment)
+          value = `${value} /* TODO: Fixme... set on computed prop... needs to be a state variable? */`;
 
-      if (!(/^\(/).test(postfix))
-        value = `${value}()`;
+        return value;
+      } else {
+        let value = `this.${toComputeName(name)}`;
+        if (assignment)
+          value = `${value} /* TODO: Fixme... set on computed prop... needs to be a state variable? */`;
 
-      return value;
+        if (!(/^\(/).test(postfix))
+          value = `${value}()`;
+
+        return value;
+      }
     } else if (type === 'state') {
       if (assignment)
         return `this.state.${toStateName(name)}`;
@@ -348,7 +363,7 @@ function mutateSourceCode(parsedResult, callback) {
     return name;
   };
 
-  return parsedCode.replace(/@@@(TAG|PROP)\[(\d+)\]@@@/g, (tagMatch, tagType, _index, offset, source) => {
+  let mutatedCode = parsedCode.replace(/@@@(TAG|PROP)\[(\d+)\]@@@/g, (tagMatch, tagType, _index, offset, source) => {
     let index = parseInt(_index, 10);
     if (tagType === 'TAG')
       return tags[index];
@@ -363,12 +378,23 @@ function mutateSourceCode(parsedResult, callback) {
     }
 
     return output;
-  }).replace(/this\.\$enyxusUtils/g, 'EnyxusUtils');
+  });
+
+  mutatedCode = mutatedCode
+    .replace(/this\.\$enyxusUtils/g, 'EnyxusUtils')
+    .replace(/this\.\$enyxusCmd/g, 'EnyxusCommands')
+    .replace(/this\.\$emit/g, 'this.emit')
+    .replace(/\bsetTimeout\b/g, 'this.debounce')
+    .replace(/this\.\$refs\.([\w$_-]+)/g, (m, refName) => {
+      return `this.getReference('$${refName}')`;
+    });
+
+  return mutatedCode;
 }
 
-function convertInlineCode(context, code, events) {
-  let result = parseCodeVariables(context, code, false);
-  return mutateSourceCode(result, ({ match, output }) => {
+function convertInlineCode(context, code, events, insideJSX) {
+  let result      = parseCodeVariables(context, code, false);
+  let mutatedCode = mutateSourceCode(result, ({ match, output }) => {
     if (match.type !== 'method')
       return output;
 
@@ -376,7 +402,11 @@ function convertInlineCode(context, code, events) {
       return `${output}(event);`;
 
     return output;
-  });
+  }, insideJSX);
+
+  // console.log('Mutated code: ', result, mutatedCode);
+
+  return mutatedCode;
 }
 
 function convertMethod(context, func, stripPrefix, convertMethodToArrow) {
@@ -469,6 +499,12 @@ function convertAttributeNameToJSXName(name) {
   if (name === 'class')
     return 'className';
 
+  if (name.indexOf(':')) {
+    return name.replace(/:(.)/g, (m, char) => {
+      return char.toUpperCase();
+    });
+  }
+
   if (name.startsWith('v-'))
     return name;
 
@@ -548,11 +584,13 @@ function attributesToJSX(context, node, attributes, _depth) {
       if (node.parent && node.parent.name === 'template')
         values = Nife.uniq([].concat(values));
 
-      value = convertInlineCode(context, values.join(', '));
+      value = convertInlineCode(context, values.join(', '), false, true);
 
-      value = `{classNames(${values.join(', ')})}`;
+      value = `{classNames(${value})}`;
+    } else if (propName === 'ref') {
+      value = `{this.captureReference(${values.join('')})}`;
     } else {
-      value = convertInlineCode(context, values.join(', '));
+      value = convertInlineCode(context, values.join(', '), false, true);
       let isSource  = hasSourceCode(context, value);
       if (propName !== 'className' && !(/^\{\{|^\{\(/).test(value) && (isSource || !(/^['"]/).test(value))) {
         if (propName === 'style' && values.length > 1)
@@ -605,7 +643,7 @@ function getForAttribute(context, attributes) {
     }
 
     if (sourceName)
-      sourceName = convertInlineCode(context, sourceName);
+      sourceName = convertInlineCode(context, sourceName, false, true);
 
     if (sourceName.match(/^\d+$/)) {
       let items = [];
@@ -659,14 +697,12 @@ function iterateHTMLNodes(callback, _incomingNodeContext) {
   let insideJSX           = incomingNodeContext.insideJSX || false;
   let results             = [];
   let firstChild          = true;
-  let insideIf            = false;
   let nodes               = incomingNodeContext.nodes;
   let filteredNodes       = filterDOMNodes(nodes, insideJSX);
 
   let nodeContext = Object.assign({ nodeIndex: 0 }, incomingNodeContext, {
     depth,
     insideJSX,
-    insideIf,
     firstChild,
   });
 
@@ -719,6 +755,7 @@ function generateJSXFromDOM(nodes, incomingNodeContext) {
       attributes,
       node,
       nodeName,
+      insideJSX,
     } = nodeContext;
 
     let prefix = MiscUtils.getTabWidthForDepth(depth);
@@ -726,8 +763,12 @@ function generateJSXFromDOM(nodes, incomingNodeContext) {
 
     results.push(`${prefix}<${nodeName}`);
 
-    if (nodeContext.isTemplate)
+    if (nodeContext.isTemplate) {
+      if (!insideJSX)
+        results.push(` ref={this.captureReference('rootElement')} className='${context.convertedComponentName}'`);
+
       results.push(' /* TODO: Was template = true */ ');
+    }
 
     let attributesStr = attributesToJSX(context, node, attributes, depth);
     if (Nife.isNotEmpty(attributesStr)) {
@@ -738,10 +779,10 @@ function generateJSXFromDOM(nodes, incomingNodeContext) {
     let childrenStr;
 
     if (Object.prototype.hasOwnProperty.call(attributes, 'v-text')) {
-      let value = convertInlineCode(context, attributes['v-text'], false);
+      let value = convertInlineCode(context, attributes['v-text'], false, true);
       childrenStr = `  ${MiscUtils.getTabWidthForDepth(depth + 2)}{${value}}\n`;
     } else {
-      childrenStr = generateJSXFromDOM(node.children || [], Object.assign({}, nodeContext, { depth: depth + 1, nodeIndex: 0 }));
+      childrenStr = generateJSXFromDOM(node.children || [], Object.assign({}, nodeContext, { depth: depth + 1, nodeIndex: 0, insideJSX: true }));
     }
 
     if (Nife.isNotEmpty(childrenStr)) {
@@ -790,7 +831,7 @@ function generateJSXFromDOM(nodes, incomingNodeContext) {
 
       let type            = ifAttribute.type;
       let isShow          = (type === 'v-show');
-      let value           = convertInlineCode(context, ifAttribute.value);
+      let value           = convertInlineCode(context, ifAttribute.value, false, true);
       let innerPrefix     = MiscUtils.getTabWidthForDepth(depth + 1);
       let innerPrefix2    = MiscUtils.getTabWidthForDepth(depth + 2);
 
@@ -823,7 +864,7 @@ function generateJSXFromDOM(nodes, incomingNodeContext) {
         condition = ' ';
 
       results.push(`${(type !== 'if') ? ' ' : innerPrefix}${type}${condition}{\n`);
-      let innerResult = constructNode(Object.assign({}, nodeContext, { node, depth: depth + 3 }));
+      let innerResult = constructNode(Object.assign({}, nodeContext, { node, depth: depth + 3, insideJSX: true }));
 
       if (Nife.isEmpty(innerResult))
         results.push(`${innerPrefix2}return null;`);
@@ -863,7 +904,7 @@ function generateJSXFromDOM(nodes, incomingNodeContext) {
     let innerPrefix     = MiscUtils.getTabWidthForDepth(depth + 1);
 
     forLoopResults.push(`${prefix}{${forAttribute.sourceName}.map((${args}) => {\n`);
-    let innerResult = constructNode(Object.assign({}, nodeContext, { node, depth: depth + 2 }));
+    let innerResult = constructNode(Object.assign({}, nodeContext, { node, depth: depth + 2, insideJSX: true }));
 
     if (Nife.isEmpty(innerResult))
       forLoopResults.push(`${innerPrefix}return null;`);
@@ -916,6 +957,40 @@ function generateState(state) {
   return MiscUtils.convertValueToJS(MiscUtils.convertObjectKeys(state, toStateName), 2);
 }
 
+function generateWatchMethods(scriptObject) {
+  let watches     = (scriptObject && scriptObject.watch) || {};
+  let watchNames  = Object.keys(watches);
+  let parts       = [];
+
+  for (let i = 0, il = watchNames.length; i < il; i++) {
+    let watchName = watchNames[i];
+    let stateName = toStateName(watchName);
+    let value     = watches[watchName];
+
+    parts.push(`  onStateUpdated_${stateName} = () => {\n    /* ${value} */\n  }\n\n`);
+  }
+
+  if (Nife.isEmpty(parts))
+    return '';
+
+  return `  /* START STATE WATCH HOOKS */\n${parts.join('').trimEnd()}\n  /* END STATE WATCH HOOKS */\n`;
+}
+
+function generateComputeVariables(computedNames) {
+  if (Nife.isEmpty(computedNames))
+    return '';
+
+  let parts = [];
+  for (let i = 0, il = computedNames.length; i < il; i++) {
+    let computedName  = computedNames[i];
+    let convertedName = toComputeName(computedName);
+
+    parts.push(`    const computed${Nife.capitalize(convertedName)} = this.${convertedName}();\n`);
+  }
+
+  return parts.join('');
+}
+
 function generateReactComponent(parsedSFC) {
   let componentName           = parsedSFC.componentName;
   let convertedComponentName  = parsedSFC.convertedComponentName;
@@ -925,6 +1000,7 @@ function generateReactComponent(parsedSFC) {
   let state                   = getState(scriptObject);
   let stateInterface          = stateToInterface(componentName, state);
   let stateNames              = Object.keys(state || {});
+  let watchMethods            = generateWatchMethods(scriptObject);
   let computedNames           = getComputedNames(scriptObject);
   let methodNames             = getMethodNames(scriptObject);
   let context                 = { propNames, stateNames, computedNames, methodNames, componentName, convertedComponentName };
@@ -933,14 +1009,16 @@ function generateReactComponent(parsedSFC) {
   let methods                 = generateMethods(context, scriptObject);
   let renderJSX               = generateRenderMethod(context, parsedSFC.template);
   let hasEnyxusUtils          = (/this\.\$enyxusUtils/g).test(parsedSFC.script);
+  let hasEnyxusCmd            = (/this\.\$enyxusCmd/g).test(parsedSFC.script);
+
+  let generatedRenderComputeVariables = generateComputeVariables(computedNames);
 
   // TODO: Handle scriptSetup
 
   return `
 import React from 'react';
 import classNames from 'classnames';
-import ComponentBase from '@base/component-base';
-${(hasEnyxusUtils) ? 'import EnyxusUtils from \'@utils/enyxus-utils\';\n' : ''}import ComponentUtils from '@utils/component-utils';
+import ComponentBase from '@base/component-base';${(hasEnyxusUtils) ? '\nimport EnyxusUtils from \'@utils/enyxus-utils\';\n' : ''}${(hasEnyxusCmd) ? '\nimport EnyxusCommands from \'@utils/enyxus-cmd\';\n' : ''}
 import './styles.scss';
 
 ${propsInterface}
@@ -954,13 +1032,16 @@ export default class ${componentName} extends ComponentBase {
   constructor(props: ${componentName}Props, ...args) {
     super(props, ...args);
 
-    this.state = this.createState(${generateState(state)});
+    this.state = ${generateState(state)};
   }
+
+${watchMethods}
 
 ${methods}
 
 ${computeMethods}
   render() {
+${generatedRenderComputeVariables}
   ${renderJSX}
   }
 }
@@ -974,7 +1055,9 @@ function convertToReact(inputPath, outputPath, parsedSFC) {
   parsedSFC.convertedComponentName = nameConverted;
 
   let cssFullFileName = Path.join(filePath, 'styles.scss');
-  let styleSheet      = parsedSFC.style || '';
+  let styleSheet      = (parsedSFC.style || '').replace(/^/gm, '  ');
+
+  styleSheet = `.${nameConverted} {\n${styleSheet}\n}`;
   FileSystem.writeFileSync(cssFullFileName, styleSheet, 'utf8');
 
   let reactComponent = generateReactComponent(parsedSFC);

@@ -145,30 +145,21 @@ function convertValueToJS(_value, _depth) {
     let isArray = Array.isArray(value);
     let parts   = [];
 
-    if (isArray)
-      parts.push('[');
-    else
-      parts.push('{');
-
     for (let i = 0, il = keys.length; i < il; i++) {
       let key             = keys[i];
       let keyValue        = value[key];
       let convertedValue  = convertValueToJS(keyValue, depth + 1);
 
-      parts.push(' ');
-
       if (isArray)
         parts.push(convertedValue);
       else
-        parts.push(`\n${prefix}'${key}': ${convertedValue},`);
+        parts.push(`${prefix}'${key}': ${convertedValue}`);
     }
 
     if (isArray)
-      parts.push(']');
+      return `[\n${prefix}${parts.join(',\n').trim()}\n${prefix.replace(/^  /, '')}]`;
     else
-      parts.push(`\n${getTabWidthForDepth(depth)}}`);
-
-    return parts.join('');
+      return `${prefix.replace(/^  /, '')}{\n${parts.join(',\n')}\n${getTabWidthForDepth(depth)}}`;
   } else if (Nife.instanceOf(value, 'function')) {
     return ('' + value);
   } else if (Nife.instanceOf(value, 'string')) {
