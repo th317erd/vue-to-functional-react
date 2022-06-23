@@ -150,7 +150,11 @@ function toStateName(name) {
 }
 
 function toComputeName(name) {
-  return MiscUtils.convertPropOrStateName(name);
+  let value = MiscUtils.convertPropOrStateName(name);
+  if (value === 'state')
+    value = 'computedState';
+
+  return value;
 }
 
 function hasSourceCode(context, code) {
@@ -158,9 +162,13 @@ function hasSourceCode(context, code) {
 
   let count = 0;
 
-  parsedCode.replace(/@@@(TAG|PROP)\[(\d+)\]@@@/g, () => {
+  let remaining = parsedCode.replace(/@@@(TAG|PROP)\[(\d+)\]@@@/g, () => {
     count++;
+    return '';
   });
+
+  if (count > 0 && Nife.isNotEmpty(remaining))
+    return true;
 
   return (count > 1);
 }
@@ -250,13 +258,15 @@ function parseCodeVariables(context, code, onlyThis) {
         name,
       });
 
-      return `@@@PROP[${index}]@@@`;
+      let extra = '';
+      if (parts.length > 1)
+        extra = `.${parts.slice(1).join('')}`;
+
+      return `@@@PROP[${index}]@@@${extra}`;
     });
 
   if (onlyThis !== true) {
-    console.log('Starting parse!', parsedCode);
     parsedCode = parsedCode.replace(variablesRegExp, (m, name, offset, src) => {
-      console.log('MATCH: ', m);
       let rewindOffset = offset - 1;
       if (rewindOffset < 0)
         rewindOffset = 0;
@@ -271,7 +281,8 @@ function parseCodeVariables(context, code, onlyThis) {
       if ((/^\s*(let|var|const)\s+/).test(src.substring(rewindOffset)))
         return createTag(tags, m);
 
-      if ((/^\s*:/).test(src.substring(offset + m.length)))
+      let postfix = src.substring(offset + m.length);
+      if ((/^\s*:/).test(postfix))
         return createTag(tags, m);
 
       let type  = getPropNameType(name);
@@ -285,13 +296,11 @@ function parseCodeVariables(context, code, onlyThis) {
         offset,
         type,
         name,
+        postfix,
       });
 
       return `@@@PROP[${index}]@@@`;
     });
-
-    if (code.match(/SVG_BASE/))
-      console.log('PARSED CODE: ', code, parsedCode, matches, variablesRegExp);
   }
 
   return { parsedCode, matches, tags };
@@ -310,15 +319,20 @@ function mutateSourceCode(parsedResult, callback) {
       type,
       name,
       hasThis,
+      postfix,
     } = match;
 
     if (type === 'method') {
       return `this.${toMethodName(name)}`;
     } else if (type === 'computed') {
+      let value = `this.${toComputeName(name)}`;
       if (assignment)
-        return `this.${toComputeName(name)}() /* TODO: Fixme... needs to be a state variable */`;
+        value = `${value} /* TODO: Fixme... needs to be a state variable */`;
 
-      return `this.${toComputeName(name)}()`;
+      if (!(/^\(/).test(postfix))
+        value = `${value}()`;
+
+      return value;
     } else if (type === 'state') {
       if (assignment)
         return `this.state.${toStateName(name)}`;
@@ -358,7 +372,7 @@ function convertInlineCode(context, code, events) {
     if (match.type !== 'method')
       return output;
 
-    if (events)
+    if (events && !(/^\(/).test(match.postfix))
       return `${output}(event);`;
 
     return output;
@@ -423,7 +437,11 @@ function getMethodNames(scriptObject) {
 }
 
 function toMethodName(name) {
-  return MiscUtils.convertPropOrStateName(name);
+  let value = MiscUtils.convertPropOrStateName(name);
+  if (value === 'state')
+    value = 'methodState';
+
+  return value;
 }
 
 function generateMethods(context, scriptObject) {
@@ -481,16 +499,16 @@ function attributesToJSX(context, node, attributes, _depth) {
       continue;
     } else if ((/^v-bind:/).test(attributeName)) {
       propName  = convertAttributeNameToJSXName(attributeName.replace(/^v-bind:/, ''));
-      value     = convertInlineCode(context, attributeValue);
+      value     = attributeValue;
     } else if (attributeName.charAt(0) === ':') {
       propName  = convertAttributeNameToJSXName(attributeName.substring(1));
-      value     = convertInlineCode(context, attributeValue);
+      value     = attributeValue;
     } else if (attributeName.charAt(0) === '@') {
       let eventNameParts  = attributeName.substring(1).split('.');
       let eventName       = eventNameParts[0];
       let reactEventName  = EventUtils.convertToReactEventName(eventName);
       let comment         = '';
-      value               = convertInlineCode(context, attributeValue, true);
+      value               = attributeValue;
 
       if (eventNameParts.length > 1 || eventName === reactEventName)
         comment = ' /* TODO: WARNING: This was a special binding... please refer to the Vue code to correct this event method */';
@@ -509,10 +527,6 @@ function attributesToJSX(context, node, attributes, _depth) {
       if (propName === 'v-model')
         value = value + ' /* TODO: Dual binding from child to parent */';
     }
-
-    let isSource  = hasSourceCode(context, attributeValue);
-    if (propName !== 'className' && !(/^\{\{|^\{\(/).test(value) && (isSource || !(/^['"]/).test(value)))
-      value = `{${value.replace(/\n\s*/g, ' ')}}`;
 
     if (!propName || !value)
       continue;
@@ -534,9 +548,18 @@ function attributesToJSX(context, node, attributes, _depth) {
       if (node.parent && node.parent.name === 'template')
         values = Nife.uniq([].concat(values));
 
+      value = convertInlineCode(context, values.join(', '));
+
       value = `{classNames(${values.join(', ')})}`;
     } else {
-      value = values.join(', ');
+      value = convertInlineCode(context, values.join(', '));
+      let isSource  = hasSourceCode(context, value);
+      if (propName !== 'className' && !(/^\{\{|^\{\(/).test(value) && (isSource || !(/^['"]/).test(value))) {
+        if (propName === 'style' && values.length > 1)
+          value = `[ ${value} ]`;
+
+        value = `{${value.replace(/\n\s*/g, ' ')}}`;
+      }
     }
 
     attributeParts.push(`${propName}=${value}`);
@@ -837,15 +860,16 @@ function generateJSXFromDOM(nodes, incomingNodeContext) {
 
     let args            = [ forAttribute.name, forAttribute.indexName ].filter(Boolean).join(', ');
     let forLoopResults  = [];
-    let innerPrefix     = MiscUtils.getTabWidthForDepth(depth + 3);
+    let innerPrefix     = MiscUtils.getTabWidthForDepth(depth + 1);
 
-    forLoopResults.push(`\n${prefix}{${forAttribute.sourceName}.map((${args}) => {\n`);
+    forLoopResults.push(`${prefix}{${forAttribute.sourceName}.map((${args}) => {\n`);
     let innerResult = constructNode(Object.assign({}, nodeContext, { node, depth: depth + 2 }));
 
     if (Nife.isEmpty(innerResult))
       forLoopResults.push(`${innerPrefix}return null;`);
     else
-      forLoopResults.push(`${innerPrefix}return (\n${innerResult}\n${innerPrefix});`);
+      forLoopResults.push(`${innerPrefix}return (\n${innerResult}${innerPrefix});`);
+
     forLoopResults.push(`\n${prefix}})}\n`);
 
     results.push(forLoopResults.join(''));
@@ -915,21 +939,22 @@ function generateReactComponent(parsedSFC) {
   return `
 import React from 'react';
 import classNames from 'classnames';
-${(hasEnyxusUtils) ? 'import EnyxusUtils from \'@utils/enyxus-utils\';\n' : '\n'}import ComponentUtils from '@utils/component-utils';
+import ComponentBase from '@base/component-base';
+${(hasEnyxusUtils) ? 'import EnyxusUtils from \'@utils/enyxus-utils\';\n' : ''}import ComponentUtils from '@utils/component-utils';
 import './styles.scss';
 
 ${propsInterface}
 
 ${stateInterface}
 
-export default class ${componentName} extends React.PureComponent {
+export default class ${componentName} extends ComponentBase {
   props: ${componentName}Props;
   state: ${componentName}State;
 
   constructor(props: ${componentName}Props, ...args) {
     super(props, ...args);
 
-    this.state = ComponentUtils.createState(${generateState(state)});
+    this.state = this.createState(${generateState(state)});
   }
 
 ${methods}
