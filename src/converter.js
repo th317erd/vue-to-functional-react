@@ -229,6 +229,9 @@ function parseCodeVariables(context, code, onlyThis) {
     return (a.length < b.length) ? 1 : -1;
   });
 
+  if (Nife.isEmpty(allVariableNames))
+    return { parsedCode: code, matches: [], tags: [] };
+
   let variablesRegExp       = new RegExp(`(\\b${allVariableNames.join('\\b|\\b')}\\b)`, 'g');
   let variablesRegExpSingle = new RegExp(`^(\\b${allVariableNames.join('\\b|\\b')}\\b)$`);
   let matches = [];
@@ -306,8 +309,6 @@ function parseCodeVariables(context, code, onlyThis) {
 
       return `@@@PROP[${index}]@@@`;
     });
-
-    // console.log('Parsed code ', code, parsedCode, matches, variablesRegExp);
   }
 
   return { parsedCode, matches, tags };
@@ -380,8 +381,7 @@ function mutateSourceCode(parsedResult, callback, insideJSX) {
     return output;
   });
 
-  mutatedCode = mutatedCode
-    .replace(/this\.\$enyxusUtils/g, 'EnyxusUtils')
+  mutatedCode = mutatedCode.replace(/this\.\$enyxusUtils/g, 'EnyxusUtils')
     .replace(/this\.\$enyxusCmd/g, 'EnyxusCommands')
     .replace(/this\.\$emit/g, 'this.emit')
     .replace(/\bsetTimeout\b/g, 'this.debounce')
@@ -403,8 +403,6 @@ function convertInlineCode(context, code, events, insideJSX) {
 
     return output;
   }, insideJSX);
-
-  // console.log('Mutated code: ', result, mutatedCode);
 
   return mutatedCode;
 }
@@ -499,7 +497,8 @@ function convertAttributeNameToJSXName(name) {
   if (name === 'class')
     return 'className';
 
-  if (name.indexOf(':')) {
+
+  if (name.indexOf(':') >= 0) {
     return name.replace(/:(.)/g, (m, char) => {
       return char.toUpperCase();
     });
@@ -527,10 +526,7 @@ function attributesToJSX(context, node, attributes, _depth) {
     let propName        = undefined;
     let value           = undefined;
 
-    if (attributeName === 'v-text') {
-      // Handled at the JSX level
-      continue;
-    } else if ((/^(v-text|v-html|v-for|v-if|v-else-if|v-else|v-show)/).test(attributeName)) {
+    if ((/^(v-text|v-html|v-for|v-if|v-else-if|v-else|v-show)/).test(attributeName)) {
       // Handled at the JSX level
       continue;
     } else if ((/^v-bind:/).test(attributeName)) {
@@ -571,7 +567,7 @@ function attributesToJSX(context, node, attributes, _depth) {
     if (!values)
       values = finalAttributes[propName] = [];
 
-    values.push(value);
+    values.push(value.replace(/[\n\s]+/g, ' '));
   }
 
   let keys = Object.keys(finalAttributes);
@@ -590,7 +586,19 @@ function attributesToJSX(context, node, attributes, _depth) {
     } else if (propName === 'ref') {
       value = `{this.captureReference(${values.join('')})}`;
     } else {
-      value = convertInlineCode(context, values.join(', '), false, true);
+      if (propName === 'style') {
+        value = values.map((thisValue) => {
+          if ((/^(['"])(?:\\.|.)*?\1$/).test(thisValue)) {
+            let parsedCSS = MiscUtils.parseCSS(thisValue.substring(1, thisValue.length - 1));
+            return MiscUtils.convertValueToJS(parsedCSS).trim().replace(/[\n\s]+/g, ' ');
+          }
+
+          return convertInlineCode(context, thisValue, false, true);
+        }).join(', ');
+      } else {
+        value = convertInlineCode(context, values.join(', '), false, true);
+      }
+
       let isSource  = hasSourceCode(context, value);
       if (propName !== 'className' && !(/^\{\{|^\{\(/).test(value) && (isSource || !(/^['"]/).test(value))) {
         if (propName === 'style' && values.length > 1)
@@ -996,7 +1004,7 @@ function generateReactComponent(parsedSFC) {
   let convertedComponentName  = parsedSFC.convertedComponentName;
   let scriptObject            = MiscUtils.evalScript(parsedSFC.script);
   let propsInterface          = propsToInterface(componentName, scriptObject);
-  let propNames               = Object.keys(scriptObject.props || {});
+  let propNames               = (Array.isArray(scriptObject.props)) ? scriptObject.props : Object.keys(scriptObject.props || {});
   let state                   = getState(scriptObject);
   let stateInterface          = stateToInterface(componentName, state);
   let stateNames              = Object.keys(state || {});
@@ -1061,8 +1069,6 @@ function convertToReact(inputPath, outputPath, parsedSFC) {
   FileSystem.writeFileSync(cssFullFileName, styleSheet, 'utf8');
 
   let reactComponent = generateReactComponent(parsedSFC);
-  //let templateStr = Util.inspect(parsedSFC.template, { depth: Infinity });
-  // console.log('COMPONENT: ', reactComponent);
 
   FileSystem.writeFileSync(fullFileName, reactComponent, 'utf8');
 }

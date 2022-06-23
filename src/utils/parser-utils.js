@@ -7,7 +7,9 @@ function parseVueSFC(filePath) {
   let fileContents = FileSystem.readFileSync(filePath, 'utf8');
   let dom = HTMLParser.parseDocument(fileContents, {
     //xml:                  true,
-    recognizeSelfClosing: true,
+    recognizeSelfClosing:     true,
+    lowerCaseTags:            false,
+    lowerCaseAttributeNames:  false,
   });
 
   let template;

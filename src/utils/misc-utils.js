@@ -100,14 +100,11 @@ function convertPropOrStateName(propName) {
     if ((/^[A-Z0-9$]+$/).test(propName))
       newName = newName.toLowerCase();
 
-    newName = newName.replace(/[A-Z0-9]+/g, (m) => `-${m}`).replace(/[A-Za-z0-9]+/g, convertSpecialWords).replace(/-/g, '');
+    newName = newName.replace(/[A-Z0-9]+/g, (m) => `-${m}`).toLowerCase().replace(/[A-Za-z0-9]+/g, convertSpecialWords).replace(/-+/g, '_').replace(/^[_-]+/, '').replace(/[_-]+$/, '');
 
-    return newName;
+    return Nife.snakeCaseToCamelCase(newName);
   } else {
     let newName = propName.replace(/[A-Z0-9]+/g, (m) => `-${m}`).replace(/[A-Za-z0-9]+/g, convertSpecialWords).replace(/[_-]+/g, '_').replace(/^[_-]+/, '').replace(/[_-]+$/, '');
-    if (propName === 'row_hovered')
-      console.log('NEW NAME: ', propName, newName, Nife.snakeCaseToCamelCase(newName.toLowerCase()));
-
     return Nife.snakeCaseToCamelCase(newName.toLowerCase());
   }
 }
@@ -171,6 +168,28 @@ function convertValueToJS(_value, _depth) {
   }
 }
 
+function parseCSS(cssStr) {
+  let css = {};
+  cssStr.replace(/([\w-]+?)\s*:\s*([^;]+)/g, function(m, name, _value) {
+    let value     = _value;
+    let isString  = value.match(/^['"]/);
+
+    value = value.replace(/^(['"])(.*)\1$/g, '$2');
+
+    if (!isString && value.match(/^[\d-.]+$/)) {
+      let number = parseFloat(value);
+      if (isFinite(number))
+        value = number;
+    }
+
+    css[name.replace(/-(\w)/g, function(m, p) {
+      return p.toUpperCase();
+    })] = value;
+  });
+
+  return css;
+}
+
 module.exports = {
   toHyphenated,
   cleanComponentScript,
@@ -179,4 +198,5 @@ module.exports = {
   convertObjectKeys,
   convertValueToJS,
   evalScript,
+  parseCSS,
 };
