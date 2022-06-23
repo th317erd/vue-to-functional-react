@@ -62,6 +62,8 @@ export default class ComponentBase extends React.PureComponent {
           },
           set: (value) => {
             let oldValue = internalState[fieldName];
+            if (oldValue === value)
+              return;
 
             internalState[fieldName] = value;
             this.setState({ [fieldName]: value });
