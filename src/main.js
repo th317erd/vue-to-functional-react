@@ -71,12 +71,25 @@ Usage: vue-to-react -i {input folder} -o {output folder}
   }
 
   console.log('CLASS LIST: ');
-  global.classList.filter((className) => {
+  Object.keys(global.classList).filter((className) => {
     if (className.startsWith('enyxus'))
       return false;
 
     return true;
-  }).sort().forEach((className) => {
-    console.log(className);
+  }).sort((a, b) => {
+    let countA = global.classList[a];
+    let countB = global.classList[b];
+
+    if (countA === countB) {
+      if (a === b)
+        return 0;
+
+      return (a < b) ? -1 : 1;
+    }
+
+    return (countA < countB) ? 1 : -1;
+  }).forEach((className) => {
+    let count = global.classList[className];
+    console.log(`${className} -> ${count}`);
   });
 })();

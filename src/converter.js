@@ -5,14 +5,13 @@
 const Nife          = require('nife');
 const Path          = require('path');
 const FileSystem    = require('fs');
-const Util          = require('util');
 const {
   FileUtils,
   MiscUtils,
   EventUtils,
 } = require('./utils');
 
-global.classList = [];
+global.classList = {};
 
 function parseClassNames(str) {
   let classes = [];
@@ -26,7 +25,11 @@ function parseClassNames(str) {
       classes = classes.concat(string.split(/\s+/g));
     });
 
-  global.classList = Nife.uniq(global.classList.concat(classes));
+  for (let i = 0, il = classes.length; i < il; i++) {
+    let className = classes[i];
+    let count     = global.classList[className] || 0;
+    global.classList[className] = count + 1;
+  }
 }
 
 function trimMethodDepth(str, depth) {
