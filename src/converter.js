@@ -203,16 +203,6 @@ function parseCodeVariables(context, code, onlyThis) {
     return `@@@TAG[${index}]@@@`;
   };
 
-  const parseAssignment = (str) => {
-    let assignment;
-
-    str.replace(/^\s*([+*/-]?=)\s*([^=][^;]+)/, (m, operator, rightHand) => {
-      assignment = { operator: operator.trim(), rightHand: rightHand.trim() };
-    });
-
-    return assignment;
-  };
-
   let allVariableNames = Nife.uniq(
     Nife.arrayFlatten([
       propNames,
@@ -258,7 +248,6 @@ function parseCodeVariables(context, code, onlyThis) {
       let index = matches.length;
 
       matches.push({
-        assignment: parseAssignment(src.substring(offset + m.length)),
         hasThis:    true,
         length:     m.length,
         offset,
@@ -297,7 +286,6 @@ function parseCodeVariables(context, code, onlyThis) {
       let index = matches.length;
 
       matches.push({
-        assignment: parseAssignment(src.substring(offset + m.length)),
         hasThis:    false,
         length:     m.length,
         index,
@@ -311,10 +299,21 @@ function parseCodeVariables(context, code, onlyThis) {
     });
   }
 
+  parsedCode = parsedCode.replace(/@@@PROP\[(\d+)\]@@@\s*([+*/-]?=)\s*([^=][^;\n]+)/g, (m, _index, operator, rightHand) => {
+    let index = parseInt(_index, 10);
+    let match = matches[index];
+
+    match.assignment = { operator: operator.trim(), rightHand: rightHand.trim() };
+
+    return `@@@PROP[${index}]@@@`;
+  });
+
+  // console.log('PARSED: ', code, parsedCode, matches);
+
   return { parsedCode, matches, tags };
 }
 
-function mutateSourceCode(parsedResult, callback, insideJSX) {
+function mutateSourceCode(parsedResult, callback, insideJSX, noThis) {
   let {
     parsedCode,
     matches,
@@ -350,12 +349,28 @@ function mutateSourceCode(parsedResult, callback, insideJSX) {
         return value;
       }
     } else if (type === 'state') {
-      if (assignment)
-        return `this.state.${toStateName(name)}`;
+      let stateName = toStateName(name);
 
-      return `this.state.${toStateName(name)}`;
+      if (assignment) {
+        let fullAssignment = assignment.rightHand;
+        if (assignment.operator.charAt(0) !== '=')
+          fullAssignment = `state.${stateName} ${assignment.operator.charAt(0)} ${assignment.rightHand}`;
+
+        if (fullAssignment.indexOf('@@@') >= 0)
+          fullAssignment = mutateSourceCode({ parsedCode: fullAssignment, matches, tags }, callback, insideJSX, true);
+
+        return `this.setState((state, props) => ({ ${stateName}: ${fullAssignment} }))`;
+      }
+
+      if (noThis)
+        return `state.${stateName}`;
+      else
+        return `this.state.${stateName}`;
     } else if (type === 'prop') {
-      return `this.props.${toPropName(name)}`;
+      if (noThis)
+        return `props.${toPropName(name)}`;
+      else
+        return `this.props.${toPropName(name)}`;
     }
 
     if (hasThis)

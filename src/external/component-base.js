@@ -5,8 +5,6 @@ export default class ComponentBase<P, S> extends React.PureComponent<P, S> {
   constructor(...args) {
     super(...args);
 
-    let internalState = {};
-
     Object.defineProperties(this, {
       '_debounceTimers': {
         writeable:    false,
@@ -26,16 +24,6 @@ export default class ComponentBase<P, S> extends React.PureComponent<P, S> {
         configurable: false,
         value:        {},
       },
-      'state': {
-        enumerable:  false,
-        configurable: false,
-        get: () => {
-          return internalState;
-        },
-        set: (value) => {
-          internalState = this._createStateObjectHooks(value);
-        },
-      },
     });
   }
 
@@ -47,44 +35,6 @@ export default class ComponentBase<P, S> extends React.PureComponent<P, S> {
       return;
 
     stateUpdateMethod.call(this, value, oldValue);
-  }
-
-  _createStateObjectHooks(state) {
-    const createStateHook = (state, internalState, fieldName, defaultValue) => {
-      internalState[fieldName] = defaultValue;
-
-      Object.defineProperties(state, {
-        [fieldName]: {
-          enumerable:  false,
-          configurable: false,
-          get: () => {
-            return internalState[fieldName];
-          },
-          set: (value) => {
-            let oldValue = internalState[fieldName];
-            if (oldValue === value)
-              return;
-
-            internalState[fieldName] = value;
-            this.setState({ [fieldName]: value });
-
-            this._callStateUpdateHooks(fieldName, value, oldValue);
-          },
-        },
-      });
-    };
-
-    let fieldNames    = Object.keys(state || {});
-    let internalState = {};
-
-    for (let i = 0, il = fieldNames.length; i < il; i++) {
-      let fieldName = fieldNames[i];
-      let value     = state[fieldName];
-
-      createStateHook(state, internalState, fieldName, value);
-    }
-
-    return state;
   }
 
   getReference(name) {
