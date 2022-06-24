@@ -1194,6 +1194,7 @@ export default {
   title:      '${componentName}',
 }
 
+// @ts-ignore
 const Template = (props: object) => (<${componentName} {...props} />);
 
 export const Default = Template.bind({});
