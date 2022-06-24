@@ -2,7 +2,12 @@ import React from 'react';
 import ReactDOM from 'react-dom';
 
 export default class ComponentBase<P, S> extends React.PureComponent<P, S> {
+  _debounceTimers: object;
+  _references: object;
+  cachedReferenceMethods: object;
+
   constructor(...args) {
+    // @ts-ignore
     super(...args);
 
     Object.defineProperties(this, {

@@ -1084,6 +1084,7 @@ ${stateInterface}
 
 export default class ${componentName} extends ComponentBase<${componentName}Props, ${componentName}State> {
   constructor(...args) {
+    // @ts-ignore
     super(...args);
 
     this.state = ${generateState(state)};
