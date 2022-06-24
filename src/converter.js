@@ -12,6 +12,23 @@ const {
   EventUtils,
 } = require('./utils');
 
+global.classList = [];
+
+function parseClassNames(str) {
+  let classes = [];
+
+  str
+    .replace(/['"]?([\w-]+)['"]?\s*:[^,}]+/, (m, name) => {
+      classes = classes.concat(name.trim().split(/\s+/g));
+    })
+    .replace(/(['"])(?:\\.|.)*?\1/g, (m) => {
+      let string = m.replace(/^['"]+/, '').replace(/['"]+$/, '');
+      classes = classes.concat(string.split(/\s+/g));
+    });
+
+  global.classList = Nife.uniq(global.classList.concat(classes));
+}
+
 function trimMethodDepth(str, depth) {
   let regex = new RegExp(`^ {${depth * 2}}`, 'gm');
   return str.replace(regex, '');
@@ -516,7 +533,6 @@ function convertAttributeNameToJSXName(name) {
   if (name === 'class')
     return 'className';
 
-
   if (name.indexOf(':') >= 0) {
     return name.replace(/:(.)/g, (m, char) => {
       return char.toUpperCase();
@@ -603,6 +619,8 @@ function attributesToJSX(context, node, attributes, _depth) {
         values = Nife.uniq([].concat(values));
 
       value = convertInlineCode(context, values.join(', '), false, true);
+
+      parseClassNames(value);
 
       value = `{classNames(${value})}`;
     } else if (propName === 'ref') {
@@ -1108,6 +1126,83 @@ ${generatedRenderComputeVariables}
 `;
 }
 
+function generateTestShim(parsedSFC) {
+  let {
+    componentName,
+    convertedComponentName,
+  } = parsedSFC;
+
+  return `
+import React from 'react';
+import ${componentName} from './${convertedComponentName}';
+import { shallow } from '@utils/test-utils';
+
+/* globals describe, it, expect, beforeEach, */
+
+describe('${componentName}', () => {
+  let props;
+
+  beforeEach(() => {
+    props = {};
+  });
+
+  function setup(propsOverride?: object) {
+    let finalProps = Object.assign({}, propsOverride || {}, props || {});
+    return shallow(<${componentName} {...finalProps} />);
+  }
+
+  it('renders without failing', () => {
+    const result = setup();
+    expect(result.isEmptyRender()).toBe(false);
+  });
+});
+`;
+}
+
+function generateStoryShim(parsedSFC) {
+  let {
+    componentName,
+    convertedComponentName,
+  } = parsedSFC;
+
+  let scriptObject    = MiscUtils.evalScript(parsedSFC.script);
+  let propsInterface  = propsToInterface(componentName, scriptObject);
+  let generatedArgs = [];
+
+  propsInterface.replace(/([\w_-]+):\s*(\w+)/g, (m, propName, propType) => {
+    let value = 'undefined';
+
+    if (propType === 'number')
+      value = '0';
+    else if (propType === 'string')
+      value = '\'\'';
+    else if (propType === 'boolean')
+      value = 'false';
+    else if (propType.toLowerCase() === 'array')
+      value = '[]';
+    else if (propType.toLowerCase() === 'object')
+      value = '{}';
+
+    generatedArgs.push(`  ${propName}: ${value},\n`);
+  });
+
+  return `
+import ${componentName} from './${convertedComponentName}';
+
+export default {
+  component:  ${componentName},
+  title:      '${componentName}',
+}
+
+const Template = (props: object) => (<${componentName} {...props} />);
+
+export const Default = Template.bind({});
+
+Default.args = {
+${generatedArgs.join('')}};
+`;
+}
+
 function convertToReact(inputPath, outputPath, parsedSFC) {
   let { filePath, fullFileName, name, nameConverted } = getOutputPathAndName(inputPath, outputPath, parsedSFC);
 
@@ -1121,8 +1216,13 @@ function convertToReact(inputPath, outputPath, parsedSFC) {
   FileSystem.writeFileSync(cssFullFileName, styleSheet, 'utf8');
 
   let reactComponent = generateReactComponent(parsedSFC);
-
   FileSystem.writeFileSync(fullFileName, reactComponent, 'utf8');
+
+  let testShim = generateTestShim(parsedSFC);
+  FileSystem.writeFileSync(fullFileName.replace(/\.tsx$/, '.test.tsx'), testShim, 'utf8');
+
+  let storyShim = generateStoryShim(parsedSFC);
+  FileSystem.writeFileSync(fullFileName.replace(/\.tsx$/, '.stories.tsx'), storyShim, 'utf8');
 }
 
 module.exports = {

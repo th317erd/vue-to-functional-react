@@ -69,4 +69,14 @@ Usage: vue-to-react -i {input folder} -o {output folder}
     let result = ParserUtils.parseVueSFC(inputPath);
     convertToReact(inputPath, outputPath, result);
   }
+
+  console.log('CLASS LIST: ');
+  global.classList.filter((className) => {
+    if (className.startsWith('enyxus'))
+      return false;
+
+    return true;
+  }).sort().forEach((className) => {
+    console.log(className);
+  });
 })();
