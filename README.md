@@ -1,2 +1,3 @@
-# vue-to-functional-react
+# vue-to-react-converter
+
 Turn Vue SFC components into functional React components

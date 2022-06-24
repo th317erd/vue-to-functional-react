@@ -1,5 +1,5 @@
 {
-  "name": "vue-to-functional-react",
+  "name": "vue-to-react-converter",
   "version": "1.0.0",
   "description": "Turn Vue SFC components into functional React components",
   "main": "src/main.js",
@@ -9,15 +9,15 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/th317erd/vue-to-functional-react.git"
+    "url": "git+https://github.com/th317erd/vue-to-react-converter.git"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "bugs": {
-    "url": "https://github.com/th317erd/vue-to-functional-react/issues"
+    "url": "https://github.com/th317erd/vue-to-react-converter/issues"
   },
-  "homepage": "https://github.com/th317erd/vue-to-functional-react#readme",
+  "homepage": "https://github.com/th317erd/vue-to-react-converter#readme",
   "dependencies": {
     "@spothero/eslint-plugin-spothero": "github:spothero/eslint-plugin-spothero",
     "eslint": "^8.13.0",
