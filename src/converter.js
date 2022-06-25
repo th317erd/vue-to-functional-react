@@ -1103,7 +1103,7 @@ ${propsInterface}
 
 ${stateInterface}
 
-export default class ${componentName} extends ComponentBase<${componentName}Props, ${componentName}State> {
+export default class ${componentName} extends ComponentBase<${componentName}Props & React.HTMLAttributes<HTMLDivElement>, ${componentName}State> {
   constructor(...args) {
     // @ts-ignore
     super(...args);
